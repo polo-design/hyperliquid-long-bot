@@ -1,70 +1,75 @@
 import express from "express";
-import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
 
-// =======================
-// CONFIG (ENV NA RENDERZE)
-// =======================
 const HL_API = "https://api.hyperliquid.xyz";
-const WALLET = process.env.HL_WALLET;        // 0x...
-const PRIVATE_KEY = process.env.HL_PRIVATE_KEY; // hex (bez 0x)
-const TRADE_PERCENT = 0.9; // 90%
 const SYMBOL = "BTC";
+const TRADE_PERCENT = 0.9;
 
-// =======================
-// UTILS
-// =======================
-function now() {
-  return Date.now();
+// =========================
+// ENV
+// =========================
+const WALLET = process.env.HL_WALLET;
+const PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
+
+if (!WALLET || !PRIVATE_KEY) {
+  console.error("❌ Missing ENV variables");
+  process.exit(1);
 }
 
+// =========================
+// HELPERS
+// =========================
 async function hlInfo(body) {
-  const r = await fetch(`${HL_API}/info`, {
+  const res = await fetch(`${HL_API}/info`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  return r.json();
+  return res.json();
 }
 
 async function hlExchange(body) {
-  const r = await fetch(`${HL_API}/exchange`, {
+  const res = await fetch(`${HL_API}/exchange`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  return r.json();
+  return res.json();
 }
 
-// =======================
-// BALANCE
-// =======================
-async function getAccountValue() {
-  const state = await hlInfo({
+// =========================
+// STATE
+// =========================
+async function getUserState() {
+  return hlInfo({
     type: "userState",
     user: WALLET,
   });
-
-  if (!state?.marginSummary?.accountValue) {
-    throw new Error("Cannot read account value");
-  }
-
-  return Number(state.marginSummary.accountValue);
 }
 
-// =======================
-// ORDERS
-// =======================
+function getOpenPosition(state) {
+  return state.assetPositions?.find(
+    (p) => p.position && p.position.szi !== "0"
+  );
+}
+
+// =========================
+// ACTIONS
+// =========================
 async function openLong() {
-  const accountValue = await getAccountValue();
-  const notional = accountValue * TRADE_PERCENT;
+  const state = await getUserState();
+  const pos = getOpenPosition(state);
 
-  console.log("ACCOUNT VALUE:", accountValue);
-  console.log("OPEN LONG NOTIONAL:", notional);
+  if (pos) {
+    return { status: "ignored", reason: "position already open" };
+  }
 
-  const order = {
+  const equity = Number(state.marginSummary.accountValue);
+  const notional = equity * TRADE_PERCENT;
+
+  const res = await hlExchange({
     type: "order",
     orders: [
       {
@@ -72,19 +77,23 @@ async function openLong() {
         isBuy: true,
         reduceOnly: false,
         orderType: { market: {} },
-        sz: notional,
+        sz: notional.toFixed(2),
       },
     ],
-    nonce: now(),
-  };
+  });
 
-  return hlExchange(order);
+  return { status: "long_sent", res };
 }
 
 async function closePosition() {
-  console.log("CLOSE POSITION 100%");
+  const state = await getUserState();
+  const pos = getOpenPosition(state);
 
-  const order = {
+  if (!pos) {
+    return { status: "ignored", reason: "no open position" };
+  }
+
+  const res = await hlExchange({
     type: "order",
     orders: [
       {
@@ -92,56 +101,40 @@ async function closePosition() {
         isBuy: false,
         reduceOnly: true,
         orderType: { market: {} },
-        sz: "ALL",
+        sz: "100%",
       },
     ],
-    nonce: now(),
-  };
+  });
 
-  return hlExchange(order);
+  return { status: "closed", res };
 }
 
-// =======================
+// =========================
 // WEBHOOK
-// =======================
+// =========================
 app.post("/webhook", async (req, res) => {
   try {
     const { side } = req.body;
 
-    if (side !== "long" && side !== "short") {
-      return res.status(422).json({ error: "invalid payload" });
-    }
-
-    console.log("WEBHOOK RECEIVED:", side);
-
     if (side === "long") {
-      const result = await openLong();
-      console.log("LONG RESULT:", result);
-      return res.json({ status: "sent", side: "long" });
+      const r = await openLong();
+      return res.json(r);
     }
 
     if (side === "short") {
-      const result = await closePosition();
-      console.log("CLOSE RESULT:", result);
-      return res.json({ status: "sent", side: "short" });
+      const r = await closePosition();
+      return res.json(r);
     }
-  } catch (err) {
-    console.error("EXECUTION ERROR:", err.message);
+
+    return res.status(422).json({ error: "invalid payload" });
+  } catch (e) {
+    console.error(e);
     return res.status(500).json({ error: "execution failed" });
   }
 });
 
-// =======================
-// HEALTH
-// =======================
-app.get("/", (_, res) => {
-  res.json({ status: "alive" });
-});
+app.get("/", (_, res) => res.json({ status: "alive" }));
 
-// =======================
-// START
-// =======================
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log("BOT LIVE on", PORT);
+app.listen(10000, () => {
+  console.log("✅ BOT LIVE on 10000");
 });
