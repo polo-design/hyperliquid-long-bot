@@ -1,48 +1,46 @@
 import os
-from fastapi import FastAPI, Request, HTTPException
-from hyperliquid.exchange_v2 import Exchange
+from fastapi import FastAPI
+from hyperliquid.exchange import Exchange
 
-HL_ACCOUNT = os.environ["HL_ACCOUNT"]
-HL_PRIVATE_KEY = os.environ["HL_PRIVATE_KEY"]
-WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
+# =========================
+# ENV VARIABLES (RENDER)
+# =========================
+# HL_ACCOUNT      -> 0x... (TWÓJ ADRES)
+# HL_PRIVATE_KEY  -> 0x... (TWÓJ PRIVATE KEY)
 
-app = FastAPI()
+HL_ACCOUNT = os.environ.get("HL_ACCOUNT")
+HL_PRIVATE_KEY = os.environ.get("HL_PRIVATE_KEY")
 
-# ✅ POPRAWNY KONSTRUKTOR W 0.4.66
+if not HL_ACCOUNT or not HL_PRIVATE_KEY:
+    raise RuntimeError("Brakuje HL_ACCOUNT lub HL_PRIVATE_KEY w zmiennych środowiskowych")
+
+# =========================
+# FASTAPI
+# =========================
+app = FastAPI(title="Hyperliquid Bot")
+
+# =========================
+# HYPERLIQUID EXCHANGE
+# =========================
 exchange = Exchange(
     wallet=HL_ACCOUNT,
     private_key=HL_PRIVATE_KEY
 )
 
+# =========================
+# ROUTES
+# =========================
 @app.get("/")
 def root():
-    return {"status": "ok"}
-
-@app.post("/webhook")
-async def webhook(req: Request):
-    data = await req.json()
-
-    if data.get("secret") != WEBHOOK_SECRET:
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    symbol = data.get("symbol", "BTC-USDC")
-    side = data.get("side", "buy")
-
-    state = exchange.info.user_state()
-    usdc = float(state["marginSummary"]["accountValue"])
-
-    price = exchange.info.mid_price(symbol)
-    size = round((usdc * 0.9) / price, 6)  # 90% kapitału
-
-    if side == "buy":
-        exchange.market_open(symbol, True, size)
-
-    elif side == "sell":
-        exchange.market_close(symbol)
-
     return {
-        "ok": True,
-        "symbol": symbol,
-        "side": side,
-        "size": size
+        "status": "ok",
+        "wallet": HL_ACCOUNT
     }
+
+@app.get("/balance")
+def balance():
+    """
+    Test: pobranie balansu konta
+    """
+    state = exchange.info.user_state(HL_ACCOUNT)
+    return state
