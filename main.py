@@ -1,7 +1,6 @@
 import os
 from fastapi import FastAPI, Request, HTTPException
-from hyperliquid.exchange import Exchange
-from hyperliquid.utils import constants
+from hyperliquid import Exchange
 
 HL_ACCOUNT = os.environ["HL_ACCOUNT"]
 HL_PRIVATE_KEY = os.environ["HL_PRIVATE_KEY"]
@@ -9,8 +8,8 @@ WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
 
 app = FastAPI()
 
+# ✅ JEDYNY POPRAWNY KONSTRUKTOR W 0.4.66
 exchange = Exchange(
-    base_url=constants.MAINNET_API_URL,
     wallet=HL_ACCOUNT,
     private_key=HL_PRIVATE_KEY
 )
@@ -29,15 +28,21 @@ async def webhook(req: Request):
     symbol = data.get("symbol", "BTC-USDC")
     side = data.get("side", "buy")
 
-    account = exchange.info.user_state(HL_ACCOUNT)
-    usdc = float(account["marginSummary"]["accountValue"])
-    price = exchange.info.mid_price(symbol)
+    state = exchange.info.user_state()
+    usdc = float(state["marginSummary"]["accountValue"])
 
+    price = exchange.info.mid_price(symbol)
     size = round((usdc * 0.9) / price, 6)  # 90% kapitału
 
     if side == "buy":
         exchange.market_open(symbol, True, size)
+
     elif side == "sell":
         exchange.market_close(symbol)
 
-    return {"ok": True}
+    return {
+        "ok": True,
+        "symbol": symbol,
+        "side": side,
+        "size": size
+    }
