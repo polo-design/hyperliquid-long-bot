@@ -1,67 +1,95 @@
 import os
 from fastapi import FastAPI, Request, HTTPException
+
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
+from hyperliquid.utils import constants
 
-# ===== ENV =====
-HL_ACCOUNT = os.environ["HL_ACCOUNT"]        # 0x...
-HL_PRIVATE_KEY = os.environ["HL_PRIVATE_KEY"]
-WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
+# =========================
+# ENV VARIABLES
+# =========================
+HL_ACCOUNT = os.environ["HL_ACCOUNT"]          # 0x... (adres account)
+HL_PRIVATE_KEY = os.environ["HL_PRIVATE_KEY"]  # private key API wallet
+WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]  # sekret webhooka
 
-SYMBOL = "BTC"
-SIZE = 0.001  # testowo mała pozycja
+# =========================
+# HYPERLIQUID CLIENTS
+# =========================
+info = Info(constants.MAINNET_API_URL)
 
-# ===== INIT =====
-exchange = Exchange(HL_ACCOUNT, HL_PRIVATE_KEY)
-info = Info()
+exchange = Exchange(
+    wallet=HL_ACCOUNT,
+    private_key=HL_PRIVATE_KEY,
+    base_url=constants.MAINNET_API_URL,
+)
 
+# =========================
+# CONFIG
+# =========================
+SYMBOL = "BTC-USDC"
+ORDER_SIZE_USD = 20  # MAŁA KWOTA TESTOWA
+
+# =========================
+# FASTAPI
+# =========================
 app = FastAPI()
 
+# =========================
+# HELPERS
+# =========================
+def get_position(symbol: str):
+    """
+    Zwraca pozycję jeśli istnieje, inaczej None
+    """
+    state = info.user_state(HL_ACCOUNT)
+    coin = symbol.replace("-USDC", "")
+
+    for pos in state["assetPositions"]:
+        if pos["position"]["coin"] == coin:
+            return pos["position"]
+
+    return None
+
+# =========================
+# WEBHOOK
+# =========================
 @app.post("/webhook")
 async def webhook(request: Request):
+    # --- security ---
     secret = request.headers.get("x-webhook-secret")
     if secret != WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
 
     data = await request.json()
-    action = data.get("action")  # "buy" albo "close"
+    action = data.get("action")
 
-    # ---- BUY ----
+    if action not in ("buy", "close"):
+        raise HTTPException(status_code=400, detail="Invalid action")
+
+    position = get_position(SYMBOL)
+
+    # =========================
+    # OPEN LONG
+    # =========================
     if action == "buy":
-        result = exchange.order(
-            coin=SYMBOL,
+        if position:
+            return {"status": "already_open"}
+
+        exchange.market_open(
+            name=SYMBOL,
             is_buy=True,
-            sz=SIZE,
-            limit_px=None,
-            order_type={"market": {}},
-            reduce_only=False,
+            sz=ORDER_SIZE_USD,
         )
-        return {"status": "opened", "result": result}
 
-    # ---- CLOSE ----
+        return {"status": "long_opened"}
+
+    # =========================
+    # CLOSE POSITION
+    # =========================
     if action == "close":
-        state = info.user_state(HL_ACCOUNT)
-        positions = state["assetPositions"]
-
-        pos = next(
-            (p for p in positions if p["position"]["coin"] == SYMBOL),
-            None
-        )
-
-        if not pos:
+        if not position:
             return {"status": "no_position"}
 
-        size = abs(float(pos["position"]["szi"]))
-        is_long = float(pos["position"]["szi"]) > 0
+        exchange.market_close(name=SYMBOL)
 
-        result = exchange.order(
-            coin=SYMBOL,
-            is_buy=not is_long,
-            sz=size,
-            limit_px=None,
-            order_type={"market": {}},
-            reduce_only=True,
-        )
-        return {"status": "closed", "result": result}
-
-    return {"status": "ignored"}
+        return {"status": "position_closed"}
