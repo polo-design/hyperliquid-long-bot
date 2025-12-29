@@ -1,68 +1,119 @@
 import os
+import time
+import hmac
+import hashlib
+import requests
 from fastapi import FastAPI, Request
-from hyperliquid.exchange import Exchange
-from hyperliquid.utils import constants
-
-# ================= CONFIG =================
-HL_ACCOUNT = os.environ["HL_ACCOUNT"]          # 0x...
-HL_PRIVATE_KEY = os.environ["HL_PRIVATE_KEY"]  # private key
-SYMBOL = "BTC"
-USE_BALANCE_PCT = 0.9  # 90%
-# ==========================================
-
-exchange = Exchange(
-    HL_ACCOUNT,
-    HL_PRIVATE_KEY,
-    constants.MAINNET_API_URL
-)
+from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
-def get_available_usdc():
-    state = exchange.user_state()
-    return float(state["marginSummary"]["accountValue"])
+# =========================
+# ENV (USTAW NA RENDERZE)
+# =========================
+HL_API_URL = "https://api.hyperliquid.xyz"
+HL_PRIVATE_KEY = os.environ["HL_PRIVATE_KEY"]   # hex string
+HL_WALLET = os.environ["HL_WALLET"]             # 0x...
+TRADE_PERCENT = 0.9                             # 90%
 
-def has_open_position():
-    positions = exchange.user_state()["assetPositions"]
-    for p in positions:
-        if p["position"]["coin"] == SYMBOL and float(p["position"]["szi"]) != 0:
-            return True
-    return False
+SYMBOL = "BTC"
+IS_PERP = True
+
+# =========================
+# HELPERS
+# =========================
+def sign(payload: str) -> str:
+    return hmac.new(
+        bytes.fromhex(HL_PRIVATE_KEY),
+        payload.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+def post(endpoint: str, body: dict):
+    body["nonce"] = int(time.time() * 1000)
+    payload = str(body)
+    sig = sign(payload)
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Signature": sig,
+        "X-Wallet": HL_WALLET
+    }
+
+    r = requests.post(
+        HL_API_URL + endpoint,
+        json=body,
+        headers=headers,
+        timeout=10
+    )
+    return r.json()
+
+# =========================
+# BALANCE
+# =========================
+def get_usdc_balance():
+    r = requests.post(
+        HL_API_URL + "/info",
+        json={"type": "userState", "wallet": HL_WALLET},
+        timeout=10
+    ).json()
+
+    return float(r["marginSummary"]["accountValue"])
+
+# =========================
+# ORDERS
+# =========================
+def open_long():
+    balance = get_usdc_balance()
+    notional = balance * TRADE_PERCENT
+
+    body = {
+        "type": "order",
+        "orders": [{
+            "asset": SYMBOL,
+            "isBuy": True,
+            "reduceOnly": False,
+            "orderType": {"market": {}},
+            "sz": notional,
+        }]
+    }
+
+    return post("/exchange", body)
 
 def close_position():
-    positions = exchange.user_state()["assetPositions"]
-    for p in positions:
-        pos = p["position"]
-        if pos["coin"] == SYMBOL and float(pos["szi"]) != 0:
-            size = abs(float(pos["szi"]))
-            exchange.market_close(SYMBOL, size)
-            return True
-    return False
+    body = {
+        "type": "order",
+        "orders": [{
+            "asset": SYMBOL,
+            "isBuy": False,
+            "reduceOnly": True,
+            "orderType": {"market": {}},
+            "sz": "ALL"
+        }]
+    }
 
-def open_long():
-    if has_open_position():
-        return "already_in_position"
+    return post("/exchange", body)
 
-    balance = get_available_usdc()
-    usd_to_use = balance * USE_BALANCE_PCT
-
-    price = float(exchange.all_mids()[SYMBOL])
-    size = round(usd_to_use / price, 6)
-
-    exchange.market_open(SYMBOL, True, size)
-    return "long_opened"
-
+# =========================
+# WEBHOOK
+# =========================
 @app.post("/webhook")
 async def webhook(req: Request):
     data = await req.json()
-    action = data.get("action")
 
-    if action == "LONG":
+    side = data.get("side")
+
+    if side == "long":
         result = open_long()
-        return {"status": result}
+        return JSONResponse({"status": "LONG OPENED", "result": result})
 
-    if action == "CLOSE":
-        closed = close_position()
-        return {"status": "closed" if closed else "no_position"}
+    if side == "short":
+        result = close_position()
+        return JSONResponse({"status": "POSITION CLOSED", "result": result})
 
-    return {"error": "unknown action"}
+    return JSONResponse({"error": "invalid payload"}, status_code=400)
+
+
+@app.get("/")
+def health():
+    return {"status": "ok"}
