@@ -1,6 +1,5 @@
 import express from "express";
 import crypto from "crypto";
-import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
@@ -8,9 +7,9 @@ app.use(express.json());
 const HL_API = "https://api.hyperliquid.xyz";
 const WALLET = process.env.HL_WALLET;
 const PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
-const TRADE_PERCENT = 0.9; // 90%
+const TRADE_PERCENT = 0.9;
 
-// ===== helpers =====
+// ===== SIGN =====
 function sign(payload) {
   return crypto
     .createHmac("sha256", Buffer.from(PRIVATE_KEY, "hex"))
@@ -18,17 +17,17 @@ function sign(payload) {
     .digest("hex");
 }
 
+// ===== POST =====
 async function hlPost(body) {
   body.nonce = Date.now();
   const payload = JSON.stringify(body);
-  const sig = sign(payload);
 
   const res = await fetch(HL_API + "/exchange", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "X-Wallet": WALLET,
-      "X-Signature": sig,
+      "X-Signature": sign(payload),
     },
     body: payload,
   });
@@ -36,7 +35,7 @@ async function hlPost(body) {
   return res.json();
 }
 
-// ===== balance =====
+// ===== BALANCE =====
 async function getBalance() {
   const res = await fetch(HL_API + "/info", {
     method: "POST",
@@ -51,7 +50,7 @@ async function getBalance() {
   return Number(data.marginSummary.accountValue);
 }
 
-// ===== orders =====
+// ===== ORDERS =====
 async function openLong() {
   const balance = await getBalance();
   const notional = balance * TRADE_PERCENT;
@@ -81,7 +80,7 @@ async function closeAll() {
   });
 }
 
-// ===== webhook =====
+// ===== WEBHOOK =====
 app.post("/webhook", async (req, res) => {
   const { side } = req.body;
 
@@ -106,5 +105,5 @@ app.post("/webhook", async (req, res) => {
 app.get("/", (_, res) => res.json({ status: "alive" }));
 
 app.listen(10000, () => {
-  console.log("🚀 REAL BOT LIVE on 10000");
+  console.log("🚀 REAL BOT LIVE");
 });
