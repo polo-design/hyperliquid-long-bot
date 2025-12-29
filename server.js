@@ -1,109 +1,103 @@
 import express from "express";
+import WebSocket from "ws";
 import crypto from "crypto";
 
 const app = express();
 app.use(express.json());
 
-const HL_API = "https://api.hyperliquid.xyz";
+const HL_WS = "wss://api.hyperliquid.xyz/ws";
 const WALLET = process.env.HL_WALLET;
-const PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
-const TRADE_PERCENT = 0.9;
+const PRIVATE_KEY = Buffer.from(process.env.HL_PRIVATE_KEY, "hex");
 
-// ===== SIGN =====
+let ws;
+let ready = false;
+
+// =======================
+// CONNECT WS
+// =======================
+function connect() {
+  ws = new WebSocket(HL_WS);
+
+  ws.on("open", () => {
+    console.log("✅ WS CONNECTED");
+    ready = true;
+  });
+
+  ws.on("message", (msg) => {
+    // debug (opcjonalne)
+    // console.log("WS:", msg.toString());
+  });
+
+  ws.on("close", () => {
+    console.log("❌ WS CLOSED – reconnecting...");
+    ready = false;
+    setTimeout(connect, 2000);
+  });
+}
+
+connect();
+
+// =======================
+// SIGN
+// =======================
 function sign(payload) {
   return crypto
-    .createHmac("sha256", Buffer.from(PRIVATE_KEY, "hex"))
+    .createHmac("sha256", PRIVATE_KEY)
     .update(payload)
     .digest("hex");
 }
 
-// ===== POST =====
-async function hlPost(body) {
-  body.nonce = Date.now();
-  const payload = JSON.stringify(body);
+// =======================
+// SEND ORDER
+// =======================
+function sendOrder(isBuy, reduceOnly) {
+  if (!ready) throw new Error("WS not ready");
 
-  const res = await fetch(HL_API + "/exchange", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Wallet": WALLET,
-      "X-Signature": sign(payload),
-    },
-    body: payload,
-  });
-
-  return res.json();
-}
-
-// ===== BALANCE =====
-async function getBalance() {
-  const res = await fetch(HL_API + "/info", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      type: "userState",
-      wallet: WALLET,
-    }),
-  });
-
-  const data = await res.json();
-  return Number(data.marginSummary.accountValue);
-}
-
-// ===== ORDERS =====
-async function openLong() {
-  const balance = await getBalance();
-  const notional = balance * TRADE_PERCENT;
-
-  return hlPost({
+  const action = {
     type: "order",
     orders: [{
       asset: "BTC",
-      isBuy: true,
-      reduceOnly: false,
+      isBuy,
+      reduceOnly,
       orderType: { market: {} },
-      sz: notional,
-    }],
-  });
+      sz: "ALL", // HL interpretuje ALL poprawnie
+    }]
+  };
+
+  const payload = JSON.stringify(action);
+  const signature = sign(payload);
+
+  ws.send(JSON.stringify({
+    method: "post",
+    id: Date.now(),
+    payload: action,
+    signature,
+    wallet: WALLET
+  }));
 }
 
-async function closeAll() {
-  return hlPost({
-    type: "order",
-    orders: [{
-      asset: "BTC",
-      isBuy: false,
-      reduceOnly: true,
-      orderType: { market: {} },
-      sz: "ALL",
-    }],
-  });
-}
-
-// ===== WEBHOOK =====
-app.post("/webhook", async (req, res) => {
-  const { side } = req.body;
-
+// =======================
+// WEBHOOK
+// =======================
+app.post("/webhook", (req, res) => {
   try {
+    const { side } = req.body;
+
     if (side === "long") {
-      const r = await openLong();
-      return res.json({ status: "LONG OPENED", r });
+      sendOrder(true, false); // open
+    } else if (side === "short") {
+      sendOrder(false, true); // close
+    } else {
+      return res.status(422).json({ error: "invalid payload" });
     }
 
-    if (side === "short") {
-      const r = await closeAll();
-      return res.json({ status: "POSITION CLOSED", r });
-    }
-
-    return res.status(422).json({ error: "invalid payload" });
+    res.json({ status: "sent", side });
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ error: "execution failed" });
+    res.status(500).json({ error: "execution failed" });
   }
 });
 
 app.get("/", (_, res) => res.json({ status: "alive" }));
 
-app.listen(10000, () => {
-  console.log("🚀 REAL BOT LIVE");
-});
+app.listen(10000, () => console.log("🚀 BOT LIVE on 10000"));
