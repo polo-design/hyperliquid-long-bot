@@ -1,52 +1,68 @@
 import os
 from fastapi import FastAPI, Request
-from hyperliquid.client import Client
+from hyperliquid.exchange import Exchange
+from hyperliquid.utils import constants
+
+# ================= CONFIG =================
+HL_ACCOUNT = os.environ["HL_ACCOUNT"]          # 0x...
+HL_PRIVATE_KEY = os.environ["HL_PRIVATE_KEY"]  # private key
+SYMBOL = "BTC"
+USE_BALANCE_PCT = 0.9  # 90%
+# ==========================================
+
+exchange = Exchange(
+    HL_ACCOUNT,
+    HL_PRIVATE_KEY,
+    constants.MAINNET_API_URL
+)
 
 app = FastAPI()
 
-HL_ACCOUNT = os.getenv("HL_ACCOUNT")
-HL_PRIVATE_KEY = os.getenv("HL_PRIVATE_KEY")
+def get_available_usdc():
+    state = exchange.user_state()
+    return float(state["marginSummary"]["accountValue"])
 
-client = Client(
-    wallet_address=HL_ACCOUNT,
-    private_key=HL_PRIVATE_KEY,
-    is_testnet=False
-)
+def has_open_position():
+    positions = exchange.user_state()["assetPositions"]
+    for p in positions:
+        if p["position"]["coin"] == SYMBOL and float(p["position"]["szi"]) != 0:
+            return True
+    return False
 
-SYMBOL = "BTC"        # BTC PERPS
-USE_BALANCE = 0.90    # 90% kapitału
+def close_position():
+    positions = exchange.user_state()["assetPositions"]
+    for p in positions:
+        pos = p["position"]
+        if pos["coin"] == SYMBOL and float(pos["szi"]) != 0:
+            size = abs(float(pos["szi"]))
+            exchange.market_close(SYMBOL, size)
+            return True
+    return False
 
-@app.get("/")
-def root():
-    return {"status": "alive"}
+def open_long():
+    if has_open_position():
+        return "already_in_position"
+
+    balance = get_available_usdc()
+    usd_to_use = balance * USE_BALANCE_PCT
+
+    price = float(exchange.all_mids()[SYMBOL])
+    size = round(usd_to_use / price, 6)
+
+    exchange.market_open(SYMBOL, True, size)
+    return "long_opened"
 
 @app.post("/webhook")
 async def webhook(req: Request):
     data = await req.json()
     action = data.get("action")
 
-    account = client.account()
-    balance = float(account["marginSummary"]["accountValue"])
-    notional = balance * USE_BALANCE
-
     if action == "LONG":
-        result = client.order(
-            coin=SYMBOL,
-            is_buy=True,
-            sz=notional,
-            order_type={"market": {}},
-            reduce_only=False
-        )
-        return {"status": "LONG opened", "result": result}
+        result = open_long()
+        return {"status": result}
 
     if action == "CLOSE":
-        result = client.order(
-            coin=SYMBOL,
-            is_buy=False,
-            sz=notional,
-            order_type={"market": {}},
-            reduce_only=True
-        )
-        return {"status": "position closed", "result": result}
+        closed = close_position()
+        return {"status": "closed" if closed else "no_position"}
 
     return {"error": "unknown action"}
