@@ -5,39 +5,36 @@ from hyperliquid.exchange import Exchange
 app = FastAPI()
 
 # =========================
-# ENVIRONMENT VARIABLES
+# ENV
 # =========================
 HL_PRIVATE_KEY = os.getenv("HL_PRIVATE_KEY")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
 if not HL_PRIVATE_KEY or not WEBHOOK_SECRET:
-    raise RuntimeError("Missing HL_PRIVATE_KEY or WEBHOOK_SECRET")
+    raise RuntimeError("Missing environment variables")
 
 # =========================
-# HYPERLIQUID SETUP
+# HYPERLIQUID
 # =========================
 exchange = Exchange(private_key=HL_PRIVATE_KEY)
 
-SYMBOL = "BTC-USDC"   # <<< WAŻNE
-SIZE = 0.001          # bardzo mały size na test
+SYMBOL = "BTC-USDC"
+SIZE = 0.001  # bardzo mały testowy size
 
 # =========================
-# WEBHOOK ENDPOINT
+# WEBHOOK
 # =========================
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
 
-    # --- SECURITY ---
     if data.get("secret") != WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
 
     signal = data.get("signal")
 
     try:
-        # =========================
-        # OPEN LONG
-        # =========================
+        # -------- OPEN LONG --------
         if signal == "Go Long":
             exchange.order(
                 coin=SYMBOL,
@@ -49,9 +46,7 @@ async def webhook(request: Request):
             )
             return {"status": "LONG OPENED"}
 
-        # =========================
-        # CLOSE POSITION (NO SHORT)
-        # =========================
+        # -------- CLOSE (NO SHORT) --------
         elif signal == "Go Short":
             exchange.order(
                 coin=SYMBOL,
