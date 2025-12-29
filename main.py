@@ -13,11 +13,11 @@ CAPITAL_PCT = 0.90
 
 app = FastAPI()
 
-# 🔥 WŁAŚCIWA KOLEJNOŚĆ ARGUMENTÓW
+# ✅ DLA hyperliquid==0.4.4
 exchange = Exchange(
+    constants.MAINNET_API_URL,
     HL_ACCOUNT,
-    HL_PRIVATE_KEY,
-    constants.MAINNET_API_URL
+    HL_PRIVATE_KEY
 )
 
 info = Info(constants.MAINNET_API_URL)
