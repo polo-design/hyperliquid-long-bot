@@ -1,29 +1,22 @@
 import os
 from fastapi import FastAPI, Request, HTTPException
 from hyperliquid.exchange import Exchange
-from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
 HL_ACCOUNT = os.environ["HL_ACCOUNT"]
 HL_PRIVATE_KEY = os.environ["HL_PRIVATE_KEY"]
 WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
 
-SYMBOL = "BTC-USDC"
-CAPITAL_PCT = 0.90
-
 app = FastAPI()
 
-# ✅ DLA hyperliquid==0.4.4
 exchange = Exchange(
-    constants.MAINNET_API_URL,
-    HL_ACCOUNT,
-    HL_PRIVATE_KEY
+    base_url=constants.MAINNET_API_URL,
+    wallet=HL_ACCOUNT,
+    private_key=HL_PRIVATE_KEY
 )
 
-info = Info(constants.MAINNET_API_URL)
-
 @app.get("/")
-def health():
+def root():
     return {"status": "ok"}
 
 @app.post("/webhook")
@@ -33,24 +26,18 @@ async def webhook(req: Request):
     if data.get("secret") != WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    action = data.get("action")
+    symbol = data.get("symbol", "BTC-USDC")
+    side = data.get("side", "buy")
 
-    state = info.user_state(HL_ACCOUNT)
-    available = float(state["marginSummary"]["availableMargin"])
-    usd_size = available * CAPITAL_PCT
+    account = exchange.info.user_state(HL_ACCOUNT)
+    usdc = float(account["marginSummary"]["accountValue"])
+    price = exchange.info.mid_price(symbol)
 
-    if action == "buy":
-        exchange.order(
-            name=SYMBOL,
-            is_buy=True,
-            sz=usd_size,
-            limit_px=None,
-            order_type="market"
-        )
-        return {"status": "LONG opened", "usd": usd_size}
+    size = round((usdc * 0.9) / price, 6)  # 90% kapitału
 
-    if action == "close":
-        exchange.close_position(SYMBOL)
-        return {"status": "Position closed"}
+    if side == "buy":
+        exchange.market_open(symbol, True, size)
+    elif side == "sell":
+        exchange.market_close(symbol)
 
-    raise HTTPException(status_code=400, detail="Unknown action")
+    return {"ok": True}
