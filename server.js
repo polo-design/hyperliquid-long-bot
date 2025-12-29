@@ -1,103 +1,147 @@
 import express from "express";
-import WebSocket from "ws";
-import crypto from "crypto";
+import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
 
-const HL_WS = "wss://api.hyperliquid.xyz/ws";
-const WALLET = process.env.HL_WALLET;
-const PRIVATE_KEY = Buffer.from(process.env.HL_PRIVATE_KEY, "hex");
-
-let ws;
-let ready = false;
+// =======================
+// CONFIG (ENV NA RENDERZE)
+// =======================
+const HL_API = "https://api.hyperliquid.xyz";
+const WALLET = process.env.HL_WALLET;        // 0x...
+const PRIVATE_KEY = process.env.HL_PRIVATE_KEY; // hex (bez 0x)
+const TRADE_PERCENT = 0.9; // 90%
+const SYMBOL = "BTC";
 
 // =======================
-// CONNECT WS
+// UTILS
 // =======================
-function connect() {
-  ws = new WebSocket(HL_WS);
-
-  ws.on("open", () => {
-    console.log("✅ WS CONNECTED");
-    ready = true;
-  });
-
-  ws.on("message", (msg) => {
-    // debug (opcjonalne)
-    // console.log("WS:", msg.toString());
-  });
-
-  ws.on("close", () => {
-    console.log("❌ WS CLOSED – reconnecting...");
-    ready = false;
-    setTimeout(connect, 2000);
-  });
+function now() {
+  return Date.now();
 }
 
-connect();
+async function hlInfo(body) {
+  const r = await fetch(`${HL_API}/info`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return r.json();
+}
 
-// =======================
-// SIGN
-// =======================
-function sign(payload) {
-  return crypto
-    .createHmac("sha256", PRIVATE_KEY)
-    .update(payload)
-    .digest("hex");
+async function hlExchange(body) {
+  const r = await fetch(`${HL_API}/exchange`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return r.json();
 }
 
 // =======================
-// SEND ORDER
+// BALANCE
 // =======================
-function sendOrder(isBuy, reduceOnly) {
-  if (!ready) throw new Error("WS not ready");
+async function getAccountValue() {
+  const state = await hlInfo({
+    type: "userState",
+    user: WALLET,
+  });
 
-  const action = {
+  if (!state?.marginSummary?.accountValue) {
+    throw new Error("Cannot read account value");
+  }
+
+  return Number(state.marginSummary.accountValue);
+}
+
+// =======================
+// ORDERS
+// =======================
+async function openLong() {
+  const accountValue = await getAccountValue();
+  const notional = accountValue * TRADE_PERCENT;
+
+  console.log("ACCOUNT VALUE:", accountValue);
+  console.log("OPEN LONG NOTIONAL:", notional);
+
+  const order = {
     type: "order",
-    orders: [{
-      asset: "BTC",
-      isBuy,
-      reduceOnly,
-      orderType: { market: {} },
-      sz: "ALL", // HL interpretuje ALL poprawnie
-    }]
+    orders: [
+      {
+        asset: SYMBOL,
+        isBuy: true,
+        reduceOnly: false,
+        orderType: { market: {} },
+        sz: notional,
+      },
+    ],
+    nonce: now(),
   };
 
-  const payload = JSON.stringify(action);
-  const signature = sign(payload);
+  return hlExchange(order);
+}
 
-  ws.send(JSON.stringify({
-    method: "post",
-    id: Date.now(),
-    payload: action,
-    signature,
-    wallet: WALLET
-  }));
+async function closePosition() {
+  console.log("CLOSE POSITION 100%");
+
+  const order = {
+    type: "order",
+    orders: [
+      {
+        asset: SYMBOL,
+        isBuy: false,
+        reduceOnly: true,
+        orderType: { market: {} },
+        sz: "ALL",
+      },
+    ],
+    nonce: now(),
+  };
+
+  return hlExchange(order);
 }
 
 // =======================
 // WEBHOOK
 // =======================
-app.post("/webhook", (req, res) => {
+app.post("/webhook", async (req, res) => {
   try {
     const { side } = req.body;
 
-    if (side === "long") {
-      sendOrder(true, false); // open
-    } else if (side === "short") {
-      sendOrder(false, true); // close
-    } else {
+    if (side !== "long" && side !== "short") {
       return res.status(422).json({ error: "invalid payload" });
     }
 
-    res.json({ status: "sent", side });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "execution failed" });
+    console.log("WEBHOOK RECEIVED:", side);
+
+    if (side === "long") {
+      const result = await openLong();
+      console.log("LONG RESULT:", result);
+      return res.json({ status: "sent", side: "long" });
+    }
+
+    if (side === "short") {
+      const result = await closePosition();
+      console.log("CLOSE RESULT:", result);
+      return res.json({ status: "sent", side: "short" });
+    }
+  } catch (err) {
+    console.error("EXECUTION ERROR:", err.message);
+    return res.status(500).json({ error: "execution failed" });
   }
 });
 
-app.get("/", (_, res) => res.json({ status: "alive" }));
+// =======================
+// HEALTH
+// =======================
+app.get("/", (_, res) => {
+  res.json({ status: "alive" });
+});
 
-app.listen(10000, () => console.log("🚀 BOT LIVE on 10000"));
+// =======================
+// START
+// =======================
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log("BOT LIVE on", PORT);
+});
