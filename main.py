@@ -1,53 +1,47 @@
 import os
 import time
-import json
 import hmac
 import hashlib
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-# =========================
-# APP
-# =========================
-app = FastAPI()
-
-# =========================
-# ENV (USTAW NA RENDERZE)
-# =========================
+# ======================
+# CONFIG
+# ======================
 HL_API_URL = "https://api.hyperliquid.xyz"
 
-HL_PRIVATE_KEY = os.environ["HL_PRIVATE_KEY"]   # hex, BEZ 0x
-HL_WALLET      = os.environ["HL_WALLET"]        # 0x...
-TRADE_PERCENT  = 0.9                            # 90%
+HL_PRIVATE_KEY = os.environ["HL_PRIVATE_KEY"]  # hex, BEZ 0x
+HL_ACCOUNT = os.environ["HL_ACCOUNT"]          # 0x...
 
-SYMBOL = "BTC-PERP"
+TRADE_PERCENT = 0.9        # 90% kapitału
+BTC_ASSET_ID = 0           # BTC perps = 0
 
-# =========================
-# LOW LEVEL
-# =========================
-def _sign(payload: str) -> str:
+app = FastAPI()
+
+# ======================
+# SIGNING
+# ======================
+def sign(payload: str) -> str:
     return hmac.new(
         bytes.fromhex(HL_PRIVATE_KEY),
         payload.encode(),
         hashlib.sha256
     ).hexdigest()
 
-def _post(endpoint: str, body: dict):
+def post(endpoint: str, body: dict):
     body["nonce"] = int(time.time() * 1000)
-
-    payload = json.dumps(body, separators=(",", ":"), sort_keys=True)
-    sig = _sign(payload)
+    payload = str(body)
 
     headers = {
         "Content-Type": "application/json",
-        "X-Signature": sig,
-        "X-Wallet": HL_WALLET
+        "X-Signature": sign(payload),
+        "X-Wallet": HL_ACCOUNT
     }
 
     r = requests.post(
         HL_API_URL + endpoint,
-        data=payload,
+        json=body,
         headers=headers,
         timeout=10
     )
@@ -57,19 +51,19 @@ def _post(endpoint: str, body: dict):
 
     return r.json()
 
-# =========================
-# INFO
-# =========================
-def get_account_value() -> float:
+# ======================
+# DATA
+# ======================
+def get_account_value():
     r = requests.post(
         HL_API_URL + "/info",
-        json={"type": "userState", "wallet": HL_WALLET},
+        json={"type": "userState", "wallet": HL_ACCOUNT},
         timeout=10
     ).json()
 
     return float(r["marginSummary"]["accountValue"])
 
-def get_mark_price() -> float:
+def get_btc_price():
     r = requests.post(
         HL_API_URL + "/info",
         json={"type": "allMids"},
@@ -78,77 +72,68 @@ def get_mark_price() -> float:
 
     return float(r["BTC"])
 
-def has_open_position() -> bool:
-    r = requests.post(
-        HL_API_URL + "/info",
-        json={"type": "userState", "wallet": HL_WALLET},
-        timeout=10
-    ).json()
-
-    for p in r["assetPositions"]:
-        if p["position"]["coin"] == "BTC":
-            sz = float(p["position"]["szi"])
-            if sz != 0:
-                return True
-    return False
-
-# =========================
+# ======================
 # TRADING
-# =========================
+# ======================
 def open_long():
-    if has_open_position():
-        return {"info": "position already open"}
-
     balance = get_account_value()
-    price   = get_mark_price()
+    price = get_btc_price()
 
-    notional = balance * TRADE_PERCENT
-    size = round(notional / price, 4)
+    usd_notional = balance * TRADE_PERCENT
+    btc_size = round(usd_notional / price, 6)
 
     body = {
         "type": "order",
         "orders": [{
-            "asset": SYMBOL,
+            "asset": BTC_ASSET_ID,
             "isBuy": True,
             "reduceOnly": False,
             "orderType": {"market": {}},
-            "sz": size
+            "sz": btc_size
         }]
     }
 
-    return _post("/exchange", body)
+    return post("/exchange", body)
 
-def close_position():
+def close_all():
     body = {
         "type": "order",
         "orders": [{
-            "asset": SYMBOL,
+            "asset": BTC_ASSET_ID,
             "isBuy": False,
             "reduceOnly": True,
             "orderType": {"market": {}},
-            "sz": "ALL"
+            "sz": 999999
         }]
     }
 
-    return _post("/exchange", body)
+    return post("/exchange", body)
 
-# =========================
+# ======================
 # WEBHOOK
-# =========================
+# ======================
 @app.post("/webhook")
 async def webhook(req: Request):
     data = await req.json()
     side = data.get("side")
 
-    if side == "long":
-        result = open_long()
-        return JSONResponse({"status": "LONG OPENED", "result": result})
+    try:
+        if side == "long":
+            return JSONResponse({
+                "status": "LONG OPENED",
+                "result": open_long()
+            })
 
-    if side == "short":
-        result = close_position()
-        return JSONResponse({"status": "POSITION CLOSED", "result": result})
+        if side == "short":
+            return JSONResponse({
+                "status": "POSITION CLOSED",
+                "result": close_all()
+            })
 
-    return JSONResponse({"error": "invalid payload"}, status_code=400)
+        return JSONResponse({"error": "invalid payload"}, status_code=400)
+
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/")
 def health():
