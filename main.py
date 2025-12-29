@@ -5,18 +5,18 @@ from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
 
 # =======================
-# ENV VARIABLES (Render)
+# ENV
 # =======================
 HL_ACCOUNT = os.environ["HL_ACCOUNT"]          # 0x...
-HL_PRIVATE_KEY = os.environ["HL_PRIVATE_KEY"]  # private key
-WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]  # np. HL_BOT_XXXX
+HL_PRIVATE_KEY = os.environ["HL_PRIVATE_KEY"]  # PRIVATE KEY
+WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
 
 # =======================
 # CONFIG
 # =======================
-SYMBOL = "BTC-USDC"
-USE_BALANCE_RATIO = 0.90   # <<< 90% kapitału
-LEVERAGE = 10              # taka sama jak ustawisz w Hyperliquid UI
+SYMBOL = "BTC"
+USE_BALANCE_RATIO = 0.90
+LEVERAGE = 10
 
 # =======================
 # INIT
@@ -24,24 +24,25 @@ LEVERAGE = 10              # taka sama jak ustawisz w Hyperliquid UI
 app = FastAPI()
 
 info = Info(constants.MAINNET_API_URL)
+
+# 🔴 TU JEST KLUCZOWA KOLEJNOŚĆ
 exchange = Exchange(
-    wallet=HL_ACCOUNT,
-    base_url=constants.MAINNET_API_URL,
-    key=HL_PRIVATE_KEY,
+    HL_ACCOUNT,
+    HL_PRIVATE_KEY,
+    constants.MAINNET_API_URL
 )
 
 # =======================
 # HELPERS
 # =======================
-def get_available_margin() -> float:
+def available_margin():
     state = info.user_state(HL_ACCOUNT)
     return float(state["marginSummary"]["availableMargin"])
 
-def get_position_size(symbol: str) -> float:
+def position_size():
     state = info.user_state(HL_ACCOUNT)
-    positions = state.get("assetPositions", [])
-    for p in positions:
-        if p["position"]["coin"] == symbol.replace("-USDC", ""):
+    for p in state.get("assetPositions", []):
+        if p["position"]["coin"] == SYMBOL:
             return abs(float(p["position"]["szi"]))
     return 0.0
 
@@ -49,52 +50,38 @@ def get_position_size(symbol: str) -> float:
 # WEBHOOK
 # =======================
 @app.post("/webhook")
-async def webhook(request: Request):
-    data = await request.json()
+async def webhook(req: Request):
+    data = await req.json()
 
-    # --- security ---
     if data.get("secret") != WEBHOOK_SECRET:
-        raise HTTPException(status_code=403, detail="Forbidden")
+        raise HTTPException(status_code=403)
 
-    action = data.get("action")  # "long" albo "close"
+    action = data.get("action")
 
-    # =======================
-    # LONG (OPEN)
-    # =======================
+    # ---- LONG ----
     if action == "long":
-        available = get_available_margin()
-        usd_position = available * USE_BALANCE_RATIO * LEVERAGE
+        margin = available_margin()
+        usd_size = margin * USE_BALANCE_RATIO * LEVERAGE
 
         exchange.market_open(
             name=SYMBOL,
             is_buy=True,
-            sz=usd_position,
+            sz=usd_size
         )
 
-        return {
-            "status": "ok",
-            "action": "long",
-            "used_usd": usd_position
-        }
+        return {"status": "long", "usd": usd_size}
 
-    # =======================
-    # CLOSE (ZAMYKA LONG)
-    # =======================
+    # ---- CLOSE ----
     if action == "close":
-        size = get_position_size(SYMBOL)
-
+        size = position_size()
         if size == 0:
-            return {"status": "ok", "message": "no position to close"}
+            return {"status": "no_position"}
 
         exchange.market_close(
             name=SYMBOL,
             sz=size
         )
 
-        return {
-            "status": "ok",
-            "action": "close",
-            "closed_size": size
-        }
+        return {"status": "closed", "size": size}
 
     return {"status": "ignored"}
