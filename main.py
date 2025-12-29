@@ -1,45 +1,86 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
+from hyperliquid.info import Info
+from hyperliquid.exchange import Exchange
+import hyperliquid.constants as constants
 import os
+import math
 
 app = FastAPI()
 
-# =========================
-# BASIC ENDPOINTS
-# =========================
+HL_PRIVATE_KEY = os.getenv("HL_PRIVATE_KEY")
+HL_ACCOUNT = os.getenv("HL_ACCOUNT")
 
-@app.get("/")
-def root():
-    return {
-        "status": "ok",
-        "service": "trading-bot",
-        "env_loaded": {
-            "HL_ACCOUNT": bool(os.getenv("HL_ACCOUNT")),
-            "HL_PRIVATE_KEY": bool(os.getenv("HL_PRIVATE_KEY")),
-        }
-    }
+info = Info(constants.MAINNET_API_URL, skip_ws=True)
+exchange = Exchange(
+    HL_ACCOUNT,
+    HL_PRIVATE_KEY,
+    constants.MAINNET_API_URL
+)
 
+SYMBOL = "BTC-USDC"
+USE_CAPITAL = 0.9  # 90%
 
-@app.get("/health")
-def health():
-    return {"health": "green"}
+def get_equity():
+    user_state = info.user_state(HL_ACCOUNT)
+    return float(user_state["marginSummary"]["accountValue"])
 
+def get_price():
+    mids = info.all_mids()
+    return float(mids[SYMBOL])
 
-# =========================
-# WEBHOOK ENDPOINT
-# =========================
+def get_position_size():
+    equity = get_equity()
+    price = get_price()
+    usd = equity * USE_CAPITAL
+    size = usd / price
+    return round(size, 4)
+
+def has_open_position():
+    state = info.user_state(HL_ACCOUNT)
+    for pos in state["assetPositions"]:
+        if pos["position"]["coin"] == "BTC":
+            return float(pos["position"]["szi"]) != 0
+    return False
+
+def open_long():
+    if has_open_position():
+        return {"status": "already_in_position"}
+
+    size = get_position_size()
+    exchange.order(
+        SYMBOL,
+        is_buy=True,
+        sz=size,
+        limit_px=None,
+        order_type="market",
+        reduce_only=False
+    )
+    return {"status": "long_opened", "size": size}
+
+def close_position():
+    if not has_open_position():
+        return {"status": "no_position"}
+
+    exchange.order(
+        SYMBOL,
+        is_buy=False,
+        sz=0,
+        limit_px=None,
+        order_type="market",
+        reduce_only=True
+    )
+    return {"status": "position_closed"}
 
 @app.post("/webhook")
-async def webhook(request: Request):
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
+async def webhook(req: Request):
+    data = await req.json()
 
-    # TU NA RAZIE TYLKO LOGIKA TESTOWA
-    print("WEBHOOK RECEIVED:")
-    print(payload)
+    side = data.get("side")
 
-    return {
-        "status": "received",
-        "payload": payload
-    }
+    if side == "long":
+        return open_long()
+
+    if side == "close":
+        return close_position()
+
+    return {"status": "ignored"}
