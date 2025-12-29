@@ -1,64 +1,17 @@
 import express from "express";
-import { Wallet } from "ethers";
-import { Exchange } from "@hyperliquid/sdk";
+import axios from "axios";
 
 const app = express();
 app.use(express.json());
 
-/* =====================
-   CONFIG
-===================== */
-const PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
-const WALLET_ADDR = process.env.HL_WALLET;
+const PORT = process.env.PORT || 10000;
 
-if (!PRIVATE_KEY || !WALLET_ADDR) {
-  throw new Error("❌ Missing HL_PRIVATE_KEY or HL_WALLET");
-}
-
-const wallet = new Wallet(PRIVATE_KEY);
-const exchange = new Exchange(wallet, "mainnet");
-
+// ====== KONFIG ======
+const HL_API = "https://api.hyperliquid.xyz";
 const SYMBOL = "BTC";
 const TRADE_PERCENT = 0.9; // 90%
 
-/* =====================
-   HELPERS
-===================== */
-async function getAccountValue() {
-  const state = await exchange.info.userState(WALLET_ADDR);
-  return Number(state.marginSummary.accountValue);
-}
-
-async function openLong() {
-  const accountValue = await getAccountValue();
-  const usdSize = accountValue * TRADE_PERCENT;
-
-  console.log("🟢 OPEN LONG", usdSize, "USD");
-
-  return exchange.order({
-    coin: SYMBOL,
-    isBuy: true,
-    sz: usdSize,
-    orderType: { market: {} },
-    reduceOnly: false,
-  });
-}
-
-async function closePosition() {
-  console.log("🔴 CLOSE POSITION (ALL)");
-
-  return exchange.order({
-    coin: SYMBOL,
-    isBuy: false,
-    sz: 0,
-    orderType: { market: {} },
-    reduceOnly: true,
-  });
-}
-
-/* =====================
-   WEBHOOK
-===================== */
+// ====== WEBHOOK ======
 app.post("/webhook", async (req, res) => {
   try {
     const { side } = req.body;
@@ -68,22 +21,27 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (side === "long") {
-      const result = await openLong();
-      return res.json({ status: "LONG OPENED", result });
+      console.log("➡️ OPEN LONG 90% BTC (PERP)");
+      // tutaj w kolejnym kroku dodamy realny order
     }
 
     if (side === "short") {
-      const result = await closePosition();
-      return res.json({ status: "POSITION CLOSED", result });
+      console.log("⬅️ CLOSE POSITION 100%");
+      // tutaj będzie close
     }
+
+    return res.json({ status: "ok", side });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: "server error" });
   }
 });
 
-app.get("/", (_, res) => res.json({ status: "alive" }));
+// ====== HEALTH ======
+app.get("/", (_, res) => {
+  res.json({ status: "alive" });
+});
 
-app.listen(10000, () => {
-  console.log("🤖 BOT LIVE on 10000");
+app.listen(PORT, () => {
+  console.log("BOT LIVE on", PORT);
 });
