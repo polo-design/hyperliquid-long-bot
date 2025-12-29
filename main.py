@@ -13,10 +13,11 @@ CAPITAL_PCT = 0.90
 
 app = FastAPI()
 
+# 🔥 WŁAŚCIWA KOLEJNOŚĆ ARGUMENTÓW
 exchange = Exchange(
-    constants.MAINNET_API_URL,
     HL_ACCOUNT,
-    HL_PRIVATE_KEY
+    HL_PRIVATE_KEY,
+    constants.MAINNET_API_URL
 )
 
 info = Info(constants.MAINNET_API_URL)
