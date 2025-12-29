@@ -1,59 +1,71 @@
+import os
 from fastapi import FastAPI, Request, HTTPException
 from hyperliquid.exchange import Exchange
-import os
 
 app = FastAPI()
 
-# ===== ENV VARIABLES =====
+# =========================
+# ENVIRONMENT VARIABLES
+# =========================
 HL_PRIVATE_KEY = os.getenv("HL_PRIVATE_KEY")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
-if not HL_PRIVATE_KEY:
-    raise RuntimeError("HL_PRIVATE_KEY not set")
+if not HL_PRIVATE_KEY or not WEBHOOK_SECRET:
+    raise RuntimeError("Missing HL_PRIVATE_KEY or WEBHOOK_SECRET")
 
-if not WEBHOOK_SECRET:
-    raise RuntimeError("WEBHOOK_SECRET not set")
+# =========================
+# HYPERLIQUID SETUP
+# =========================
+exchange = Exchange(private_key=HL_PRIVATE_KEY)
 
-# ===== HYPERLIQUID EXCHANGE =====
-exchange = Exchange(HL_PRIVATE_KEY)
+SYMBOL = "BTC-USDC"   # <<< WAŻNE
+SIZE = 0.001          # bardzo mały size na test
 
-SYMBOL = "BTC"
-ORDER_SIZE = 0.01  # <-- zmień później jeśli chcesz
-
-# ===== WEBHOOK ENDPOINT =====
+# =========================
+# WEBHOOK ENDPOINT
+# =========================
 @app.post("/webhook")
-async def webhook(req: Request):
-    data = await req.json()
+async def webhook(request: Request):
+    data = await request.json()
 
-    # --- security ---
+    # --- SECURITY ---
     if data.get("secret") != WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
 
     signal = data.get("signal")
 
-    # --- get current position ---
-    position = exchange.get_position(SYMBOL)
-
-    # ===== LONG ONLY LOGIC =====
-
-    # OPEN LONG
-    if signal == "Go Long":
-        if position is None:
-            exchange.market_open(
-                SYMBOL,
+    try:
+        # =========================
+        # OPEN LONG
+        # =========================
+        if signal == "Go Long":
+            exchange.order(
+                coin=SYMBOL,
                 is_buy=True,
-                size=ORDER_SIZE
+                sz=SIZE,
+                limit_px=None,
+                order_type="market",
+                reduce_only=False
             )
-            return {"status": "long opened"}
-        else:
-            return {"status": "long already open"}
+            return {"status": "LONG OPENED"}
 
-    # CLOSE LONG (NO SHORTS)
-    if signal == "Go Short":
-        if position is not None:
-            exchange.market_close(SYMBOL)
-            return {"status": "long closed"}
-        else:
-            return {"status": "no position to close"}
+        # =========================
+        # CLOSE POSITION (NO SHORT)
+        # =========================
+        elif signal == "Go Short":
+            exchange.order(
+                coin=SYMBOL,
+                is_buy=False,
+                sz=SIZE,
+                limit_px=None,
+                order_type="market",
+                reduce_only=True
+            )
+            return {"status": "POSITION CLOSED"}
 
-    return {"status": "ignored"}
+        else:
+            return {"status": "UNKNOWN SIGNAL"}
+
+    except Exception as e:
+        print("ERROR:", e)
+        raise HTTPException(status_code=500, detail=str(e))
