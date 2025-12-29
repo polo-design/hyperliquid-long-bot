@@ -1,6 +1,6 @@
 import os
 from fastapi import FastAPI, Request, HTTPException
-from hyperliquid import Exchange
+from hyperliquid.exchange_v2 import Exchange
 
 HL_ACCOUNT = os.environ["HL_ACCOUNT"]
 HL_PRIVATE_KEY = os.environ["HL_PRIVATE_KEY"]
@@ -8,7 +8,7 @@ WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
 
 app = FastAPI()
 
-# ✅ JEDYNY POPRAWNY KONSTRUKTOR W 0.4.66
+# ✅ POPRAWNY KONSTRUKTOR W 0.4.66
 exchange = Exchange(
     wallet=HL_ACCOUNT,
     private_key=HL_PRIVATE_KEY
