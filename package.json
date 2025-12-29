@@ -8,6 +8,6 @@
   "dependencies": {
     "express": "^4.19.2",
     "ethers": "^6.10.0",
-    "@hyperliquid/sdk": "^0.4.66"
+    "axios": "^1.6.8"
   }
 }
