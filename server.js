@@ -1,9 +1,14 @@
 import express from "express";
+import crypto from "crypto";
 
 const app = express();
 app.use(express.json());
 
-// ===== ENV =====
+const PORT = process.env.PORT || 10000;
+
+// =======================
+// ENV
+// =======================
 const HL_ACCOUNT = process.env.HL_ACCOUNT;
 const HL_PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
 
@@ -15,49 +20,113 @@ if (!HL_ACCOUNT || !HL_PRIVATE_KEY) {
 console.log("✅ ENV OK");
 console.log("👛 ACCOUNT:", HL_ACCOUNT);
 
-// ===== HEALTHCHECK =====
-app.get("/", (_, res) => {
-  res.json({ status: "alive" });
-});
+// =======================
+// HYPERLIQUID CONFIG
+// =======================
+const HL_API = "https://api.hyperliquid.xyz";
 
-// ===== WEBHOOK =====
-app.post("/webhook", async (req, res) => {
+// =======================
+// SIGN HELPERS
+// =======================
+function sign(payload) {
+  return crypto
+    .createHmac("sha256", Buffer.from(HL_PRIVATE_KEY, "hex"))
+    .update(payload)
+    .digest("hex");
+}
+
+async function hlPost(body) {
+  const payload = JSON.stringify({
+    ...body,
+    nonce: Date.now(),
+  });
+
+  const signature = sign(payload);
+
+  const res = await fetch(`${HL_API}/exchange`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Signature": signature,
+      "X-Wallet": HL_ACCOUNT,
+    },
+    body: payload,
+  });
+
+  const text = await res.text();
+
+  // 🔴 to był TWÓJ błąd wcześniej:
+  // API czasem zwraca tekst, nie JSON
   try {
-    const { side } = req.body;
+    return JSON.parse(text);
+  } catch {
+    throw new Error(text);
+  }
+}
 
-    console.log("📩 WEBHOOK:", side);
+// =======================
+// ORDERS
+// =======================
+async function openLong() {
+  return hlPost({
+    type: "order",
+    orders: [
+      {
+        asset: "BTC",
+        isBuy: true,
+        reduceOnly: false,
+        orderType: { market: {} },
+        sz: "ALL",
+      },
+    ],
+  });
+}
 
-    if (side !== "long" && side !== "short") {
-      return res.status(422).json({ error: "invalid payload" });
-    }
+async function closePosition() {
+  return hlPost({
+    type: "order",
+    orders: [
+      {
+        asset: "BTC",
+        isBuy: false,
+        reduceOnly: true,
+        orderType: { market: {} },
+        sz: "ALL",
+      },
+    ],
+  });
+}
 
-    // ===== TU NORMALNIE IDZIE HYPERLIQUID =====
-    // Na razie robimy STUB, żeby backend był STABILNY
-    // i żeby TradingView + Render działały bez crasha
+// =======================
+// WEBHOOK
+// =======================
+app.post("/webhook", async (req, res) => {
+  const { side } = req.body;
 
+  console.log("📩 WEBHOOK:", side);
+
+  try {
     if (side === "long") {
-      console.log("🚀 EXECUTE: OPEN LONG");
+      const r = await openLong();
+      return res.json({ status: "sent", side, result: r });
     }
 
     if (side === "short") {
-      console.log("🛑 EXECUTE: CLOSE POSITION");
+      const r = await closePosition();
+      return res.json({ status: "sent", side, result: r });
     }
 
-    // ===== ZAWSZE POPRAWNA ODPOWIEDŹ =====
-    return res.json({
-      status: "sent",
-      side,
-      account: HL_ACCOUNT,
-    });
-
+    return res.status(400).json({ error: "invalid payload" });
   } catch (err) {
     console.error("❌ EXECUTION ERROR:", err.message);
     return res.status(500).json({ error: "execution failed" });
   }
 });
 
-// ===== SERVER =====
-const PORT = process.env.PORT || 10000;
+app.get("/", (_, res) => {
+  res.json({ status: "alive" });
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 BOT LIVE on ${PORT}`);
 });
