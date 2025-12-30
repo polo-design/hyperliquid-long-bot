@@ -1,58 +1,60 @@
 import express from "express";
-import { Wallet, keccak256, toUtf8Bytes } from "ethers";
+import crypto from "crypto";
 
 const app = express();
 app.use(express.json());
 
-// ===== ENV =====
-const {
-  HL_PRIVATE_KEY,
-  HL_ACCOUNT,
-  PORT = 10000
-} = process.env;
+/* ===================== CONFIG ===================== */
 
-if (!HL_PRIVATE_KEY || !HL_ACCOUNT) {
+const HL_API = "https://api.hyperliquid.xyz/exchange";
+const PORT = process.env.PORT || 10000;
+
+const PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
+const ACCOUNT = process.env.HL_ACCOUNT;
+
+if (!PRIVATE_KEY || !ACCOUNT) {
   console.error("❌ Missing ENV variables");
   process.exit(1);
 }
 
-if (!HL_PRIVATE_KEY.startsWith("0x")) {
+if (!PRIVATE_KEY.startsWith("0x")) {
   console.error("❌ HL_PRIVATE_KEY must start with 0x");
   process.exit(1);
 }
 
 console.log("✅ ENV OK");
-console.log("👛 ACCOUNT:", HL_ACCOUNT);
+console.log("👛 ACCOUNT:", ACCOUNT);
 
-// ===== WALLET =====
-const wallet = new Wallet(HL_PRIVATE_KEY);
+/* ===================== HELPERS ===================== */
 
-// ===== HL CONSTANTS =====
-const HL_API = "https://api.hyperliquid.xyz/exchange";
-const BTC_ASSET_ID = 0;
-const LEVERAGE = 10;
-
-// ===== SIGN =====
+// Hyperliquid signing (HMAC-SHA256)
 function signPayload(payload) {
-  const hash = keccak256(toUtf8Bytes(JSON.stringify(payload)));
-  return wallet.signMessage(hash);
+  const msg = JSON.stringify(payload);
+  return (
+    "0x" +
+    crypto
+      .createHmac("sha256", Buffer.from(PRIVATE_KEY.slice(2), "hex"))
+      .update(msg)
+      .digest("hex")
+  );
 }
 
-// ===== SEND TO HL =====
 async function sendToHL(payload) {
-  const signature = await signPayload(payload);
+  const nonce = Date.now();
+  const signature = signPayload({ ...payload, nonce });
 
-  console.log("📤 HL PAYLOAD:", JSON.stringify(payload, null, 2));
-  console.log("✍️ SIGNATURE:", signature);
+  const body = {
+    ...payload,
+    nonce,
+    signature
+  };
+
+  console.log("📤 HL PAYLOAD:", JSON.stringify(body, null, 2));
 
   const res = await fetch(HL_API, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: payload,
-      signature,
-      nonce: Date.now()
-    })
+    body: JSON.stringify(body)
   });
 
   const text = await res.text();
@@ -60,62 +62,64 @@ async function sendToHL(payload) {
   return text;
 }
 
-// ===== SET LEVERAGE =====
-async function setLeverage() {
-  const payload = {
-    type: "updateLeverage",
-    asset: BTC_ASSET_ID,
-    leverage: LEVERAGE,
-    isCross: true
-  };
+/* ===================== ACTIONS ===================== */
 
-  console.log(`⚙️ SET LEVERAGE ${LEVERAGE}x`);
-  await sendToHL(payload);
+async function setLeverage10x() {
+  console.log("⚙️ SET LEVERAGE 10x");
+
+  return sendToHL({
+    type: "updateLeverage",
+    asset: 0,        // BTC
+    leverage: 10,
+    isCross: true
+  });
 }
 
-// ===== MARKET ORDER =====
-async function marketOrder(side) {
-  const isLong = side === "long";
+async function marketLongBTC() {
+  console.log("🚀 REAL ORDER: LONG");
 
-  const payload = {
+  return sendToHL({
     type: "order",
     orders: [
       {
-        a: BTC_ASSET_ID,
-        b: isLong,          // true = long, false = short
-        p: "0",             // MARKET (MUST be string)
-        s: "50",            // SIZE (number as string, NOT "ALL")
+        a: 0,          // BTC
+        b: true,       // BUY / LONG
+        p: "0",        // MARKET
+        s: "0.001",    // SIZE (STRING!)
         r: false,
-        tif: "Ioc"          // MARKET
+        tif: "Ioc"
       }
     ]
-  };
-
-  console.log(`🚀 REAL ORDER: ${side.toUpperCase()}`);
-  await sendToHL(payload);
+  });
 }
 
-// ===== WEBHOOK =====
+/* ===================== WEBHOOK ===================== */
+
 app.post("/webhook", async (req, res) => {
   try {
     const { side } = req.body;
-    console.log("📩 WEBHOOK:", side);
 
-    if (!side || !["long", "short"].includes(side)) {
-      return res.status(400).json({ error: "Invalid side" });
+    if (!side) {
+      return res.status(400).json({ error: "missing side" });
     }
 
-    await setLeverage();
-    await marketOrder(side);
+    console.log("📩 WEBHOOK:", side);
 
-    res.json({ success: true, side });
+    if (side === "long") {
+      await setLeverage10x();
+      const result = await marketLongBTC();
+      return res.json({ success: true, result });
+    }
+
+    res.status(400).json({ error: "unsupported side" });
   } catch (err) {
     console.error("❌ EXECUTION ERROR:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ===== START =====
+/* ===================== START ===================== */
+
 app.listen(PORT, () => {
-  console.log(`🚀 BOT LIVE on ${PORT}`);
+  console.log("🚀 BOT LIVE on", PORT);
 });
