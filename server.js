@@ -1,20 +1,17 @@
 import express from "express";
 import crypto from "crypto";
+import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
 
-/* =========================
-   ENV
-========================= */
-const {
-  HL_PRIVATE_KEY,
-  HL_ACCOUNT,
-  PORT = 10000,
-} = process.env;
+const PORT = process.env.PORT || 10000;
+
+const HL_PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
+const HL_ACCOUNT = process.env.HL_ACCOUNT;
 
 if (!HL_PRIVATE_KEY || !HL_ACCOUNT) {
-  console.error("❌ Missing ENV variables");
+  console.error("❌ Missing ENV");
   process.exit(1);
 }
 
@@ -26,42 +23,35 @@ if (!HL_PRIVATE_KEY.startsWith("0x")) {
 console.log("✅ ENV OK");
 console.log("👛 ACCOUNT:", HL_ACCOUNT);
 
-/* =========================
-   CONSTANTS
-========================= */
-const HL_API = "https://api.hyperliquid.xyz/exchange";
-const ASSET_ID = 0; // BTC-PERP
-const LEVERAGE = 10;
+const HL_ENDPOINT = "https://api.hyperliquid.xyz/exchange";
 
-/* =========================
-   SIGN
-========================= */
-function sign(payload) {
-  const msg = JSON.stringify(payload);
-  const hash = crypto
-    .createHmac("sha256", Buffer.from(HL_PRIVATE_KEY.slice(2), "hex"))
-    .update(msg)
-    .digest("hex");
-  return "0x" + hash;
+function sign(action, nonce) {
+  const payload = JSON.stringify({ action, nonce });
+  return (
+    "0x" +
+    crypto
+      .createHash("sha256")
+      .update(payload + HL_PRIVATE_KEY.slice(2))
+      .digest("hex")
+  );
 }
 
-/* =========================
-   POST TO HL
-========================= */
-async function postHL(payload) {
-  const sig = sign(payload);
+async function send(action) {
+  const nonce = Date.now();
+  const signature = sign(action, nonce);
 
-  console.log("📤 HL PAYLOAD:", JSON.stringify(payload, null, 2));
-  console.log("✍️ SIGNATURE:", sig);
+  const body = {
+    action,
+    nonce,
+    signature,
+  };
 
-  const res = await fetch(HL_API, {
+  console.log("📤 HL BODY:", JSON.stringify(body, null, 2));
+
+  const res = await fetch(HL_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: payload,
-      signature: sig,
-      account: HL_ACCOUNT,
-    }),
+    body: JSON.stringify(body),
   });
 
   const text = await res.text();
@@ -69,53 +59,43 @@ async function postHL(payload) {
   return text;
 }
 
-/* =========================
-   WEBHOOK
-========================= */
 app.post("/webhook", async (req, res) => {
   try {
-    const { side } = req.body;
-    if (!["long", "short"].includes(side)) {
-      return res.status(400).json({ error: "side must be long or short" });
-    }
+    const side = req.body.side;
+    if (!side) return res.status(400).json({ error: "missing side" });
 
     console.log("📩 WEBHOOK:", side);
 
-    /* ---- SET LEVERAGE ---- */
-    console.log(`⚙️ SET LEVERAGE ${LEVERAGE}x`);
-    await postHL({
+    // 1️⃣ SET LEVERAGE 10x CROSS
+    await send({
       type: "updateLeverage",
-      asset: ASSET_ID,
-      leverage: LEVERAGE,
+      asset: 0,
       isCross: true,
+      leverage: 10,
     });
 
-    /* ---- MARKET ORDER ---- */
-    console.log(`🚀 REAL ORDER: ${side.toUpperCase()}`);
-    const orderResult = await postHL({
+    // 2️⃣ ORDER
+    await send({
       type: "order",
       orders: [
         {
-          a: ASSET_ID,
-          b: side === "long", // true = buy / false = sell
-          p: null,            // market
-          s: "ALL",           // full size
-          r: false,
-          ioc: true,
+          asset: 0,
+          isBuy: side === "long",
+          size: "ALL",
+          limitPx: null,
+          reduceOnly: false,
+          orderType: { market: {} },
         },
       ],
     });
 
-    res.json({ success: true, result: orderResult });
-  } catch (err) {
-    console.error("❌ EXECUTION ERROR:", err.message);
-    res.status(500).json({ error: err.message });
+    res.json({ success: true });
+  } catch (e) {
+    console.error("❌ ERROR:", e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
-/* =========================
-   START
-========================= */
 app.listen(PORT, () => {
-  console.log(`🚀 BOT LIVE on ${PORT}`);
+  console.log("🚀 BOT LIVE on", PORT);
 });
