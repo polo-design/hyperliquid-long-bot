@@ -1,11 +1,11 @@
 {
-  "name": "hl-bot",
+  "name": "hyperliquid-long-bot",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "node server.ts"
+    "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "hyperliquid": "^0.4.6"
+    "express": "^4.19.2"
   }
 }
