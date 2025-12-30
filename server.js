@@ -18,6 +18,9 @@ if (!PRIVATE_KEY || !WALLET) {
   process.exit(1);
 }
 
+console.log("✅ ENV OK");
+console.log("👛 ACCOUNT:", WALLET);
+
 /* ======================
    HELPERS
 ====================== */
@@ -58,14 +61,12 @@ async function getAccountValue() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       type: "userState",
-      user: WALLET,
+      wallet: WALLET, // ✅ POPRAWIONE
     }),
   });
 
-  const text = await r.text();
-  const json = JSON.parse(text);
-
-  return Number(json.marginSummary.accountValue); // USDC
+  const json = await r.json();
+  return Number(json.marginSummary.accountValue);
 }
 
 async function getBTCPrice() {
@@ -75,9 +76,7 @@ async function getBTCPrice() {
     body: JSON.stringify({ type: "allMids" }),
   });
 
-  const text = await r.text();
-  const json = JSON.parse(text);
-
+  const json = await r.json();
   return Number(json["BTC-USDC"]);
 }
 
@@ -88,17 +87,16 @@ async function openLong100() {
   const balance = await getAccountValue(); // np. 20
   const price = await getBTCPrice();       // np. 43000
 
-  // 95% żeby NIE wywaliło margin
-  const notional = balance * 0.95;
+  const notional = balance * 0.95;          // buffer
   const size = Number((notional / price).toFixed(6));
 
-  console.log(`🟢 LONG 100% | balance=${balance} size=${size}`);
+  console.log(`🟢 LONG | balance=${balance} size=${size}`);
 
   return post("/exchange", {
     type: "order",
     orders: [
       {
-        asset: "BTC-USDC",
+        asset: "BTC",          // ✅ KLUCZOWA POPRAWKA
         isBuy: true,
         reduceOnly: false,
         orderType: { market: {} },
@@ -109,13 +107,13 @@ async function openLong100() {
 }
 
 async function closeAll() {
-  console.log("🔴 CLOSE 100%");
+  console.log("🔴 CLOSE ALL");
 
   return post("/exchange", {
     type: "order",
     orders: [
       {
-        asset: "BTC-USDC",
+        asset: "BTC",          // ✅ TU TEŻ
         isBuy: false,
         reduceOnly: true,
         orderType: { market: {} },
