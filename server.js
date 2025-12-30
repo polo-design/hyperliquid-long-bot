@@ -1,53 +1,67 @@
-// ================================
-// Hyperliquid REAL BOT – FINAL
-// ENV REQUIRED:
-// HL_PRIVATE_KEY
-// HL_ACCOUNT
-// PORT
-// ================================
-
-import crypto from "crypto";
 import express from "express";
+import crypto from "crypto";
+import { ethers } from "ethers";
 
-const {
-  HL_PRIVATE_KEY,
-  HL_ACCOUNT,
-  PORT = 10000,
-} = process.env;
+const app = express();
+app.use(express.json());
 
-// ===== HARD FAIL IF ENV WRONG =====
-if (!HL_PRIVATE_KEY || !HL_ACCOUNT) {
+/* =======================
+   ENV CHECK
+======================= */
+const ACCOUNT = process.env.HL_ACCOUNT;
+const PRIVATE_KEY_RAW = process.env.HL_PRIVATE_KEY;
+
+if (!ACCOUNT || !PRIVATE_KEY_RAW) {
   console.error("❌ Missing ENV variables");
   process.exit(1);
 }
 
-if (!HL_PRIVATE_KEY.startsWith("0x")) {
-  console.error("❌ HL_PRIVATE_KEY must start with 0x");
+if (PRIVATE_KEY_RAW.startsWith("0x")) {
+  console.error("❌ HL_PRIVATE_KEY MUST be WITHOUT 0x");
   process.exit(1);
 }
 
+const PRIVATE_KEY = "0x" + PRIVATE_KEY_RAW;
+const wallet = new ethers.Wallet(PRIVATE_KEY);
+
 console.log("✅ ENV OK");
-console.log("👛 ACCOUNT:", HL_ACCOUNT);
+console.log("👛 ACCOUNT:", wallet.address);
 
-// ===== CONSTANTS =====
-const BASE_URL = "https://api.hyperliquid.xyz";
+/* =======================
+   CONSTANTS
+======================= */
+const HL_API = "https://api.hyperliquid.xyz";
 const SYMBOL = "BTC-USDC";
-const ASSET_ID = 0; // BTC = 0 on Hyperliquid
+const ASSET = 0;          // BTC index
+const LEVERAGE = 10;      // <<< 10x
+const PORT = process.env.PORT || 10000;
 
-// ===== HELPERS =====
+/* =======================
+   SIGN HELPER
+======================= */
 function signPayload(payload) {
   const msg = JSON.stringify(payload);
-  return crypto
-    .createHmac("sha256", Buffer.from(HL_PRIVATE_KEY.slice(2), "hex"))
-    .update(msg)
-    .digest("hex");
+  const hash = crypto.createHash("sha256").update(msg).digest("hex");
+  return wallet.signMessage(ethers.getBytes("0x" + hash));
 }
 
-async function hlFetch(path, body) {
-  const res = await fetch(`${BASE_URL}${path}`, {
+/* =======================
+   SEND TO HL
+======================= */
+async function sendHL(payload) {
+  const signature = await signPayload(payload);
+
+  console.log("📤 HL PAYLOAD:", JSON.stringify(payload, null, 2));
+  console.log("✍️ SIGNATURE:", signature);
+
+  const res = await fetch(`${HL_API}/exchange`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      action: payload,
+      signature,
+      account: wallet.address,
+    }),
   });
 
   const text = await res.text();
@@ -55,88 +69,55 @@ async function hlFetch(path, body) {
   try {
     json = JSON.parse(text);
   } catch {
-    throw new Error(text);
+    json = text;
   }
 
-  if (!res.ok) {
-    throw new Error(JSON.stringify(json));
-  }
-
+  console.log("📥 HL RESPONSE:", json);
   return json;
 }
 
-// ===== GET MARK PRICE =====
-async function getMarkPrice() {
-  const res = await hlFetch("/info", {
-    type: "allMids",
-  });
+/* =======================
+   SET LEVERAGE
+======================= */
+async function setLeverage() {
+  const payload = {
+    type: "updateLeverage",
+    asset: ASSET,
+    leverage: LEVERAGE,
+    isCross: true,
+  };
 
-  const price = Number(res.mids[SYMBOL]);
-  if (!price) throw new Error("No mark price");
-
-  return price;
+  console.log(`⚙️ SET LEVERAGE ${LEVERAGE}x`);
+  return sendHL(payload);
 }
 
-// ===== GET ACCOUNT BALANCE =====
-async function getUsdcBalance() {
-  const res = await hlFetch("/info", {
-    type: "clearinghouseState",
-    user: HL_ACCOUNT,
-  });
-
-  const usdc = Number(res.marginSummary.accountValue);
-  if (!usdc || usdc <= 0) throw new Error("No balance");
-
-  return usdc;
-}
-
-// ===== PLACE REAL ORDER =====
+/* =======================
+   PLACE ORDER (ALL IN)
+======================= */
 async function placeOrder(side) {
   const isBuy = side === "long";
 
-  const price = await getMarkPrice();
-  const balance = await getUsdcBalance();
-
-  // use 100% balance
-  const size = +(balance / price).toFixed(4);
-
-  const action = {
+  const payload = {
     type: "order",
     orders: [
       {
-        a: ASSET_ID,
+        a: ASSET,
         b: isBuy,
-        p: price,
-        s: size,
+        p: null,        // MARKET
+        s: "ALL",       // 100% balance
         r: false,
-        t: "market",
+        ioc: true,
       },
     ],
   };
 
-  const payload = {
-    action,
-    nonce: Date.now(),
-    account: HL_ACCOUNT,
-  };
-
-  const signature = signPayload(payload);
-
-  console.log("📦 PAYLOAD:", JSON.stringify(payload, null, 2));
-  console.log("✍️ SIGNATURE:", signature);
-
-  const result = await hlFetch("/exchange", {
-    payload,
-    signature,
-  });
-
-  return result;
+  console.log("🚀 REAL ORDER:", side.toUpperCase());
+  return sendHL(payload);
 }
 
-// ===== EXPRESS =====
-const app = express();
-app.use(express.json());
-
+/* =======================
+   WEBHOOK
+======================= */
 app.post("/webhook", async (req, res) => {
   try {
     const { side } = req.body;
@@ -144,22 +125,27 @@ app.post("/webhook", async (req, res) => {
       return res.status(400).json({ error: "invalid payload" });
     }
 
-    console.log("🚀 REAL ORDER:", side);
+    console.log("📩 WEBHOOK:", side);
 
+    // 1️⃣ SET LEVERAGE (required)
+    await setLeverage();
+
+    // 2️⃣ PLACE ORDER
     const result = await placeOrder(side);
-
-    console.log("✅ ORDER RESULT:", result);
 
     res.json({ success: true, result });
   } catch (err) {
-    console.error("❌ EXECUTION ERROR:", err.message);
+    console.error("❌ EXECUTION ERROR:", err);
     res.status(500).json({
       error: "execution failed",
-      details: err.message,
+      details: err?.message || err,
     });
   }
 });
 
+/* =======================
+   START
+======================= */
 app.listen(PORT, () => {
   console.log(`🚀 BOT LIVE on ${PORT}`);
 });
