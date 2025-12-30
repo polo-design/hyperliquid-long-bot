@@ -1,17 +1,15 @@
 import express from "express";
 import crypto from "crypto";
-import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
-
 const HL_PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
 const HL_ACCOUNT = process.env.HL_ACCOUNT;
 
 if (!HL_PRIVATE_KEY || !HL_ACCOUNT) {
-  console.error("❌ Missing ENV");
+  console.error("❌ Missing ENV variables");
   process.exit(1);
 }
 
@@ -25,17 +23,19 @@ console.log("👛 ACCOUNT:", HL_ACCOUNT);
 
 const HL_ENDPOINT = "https://api.hyperliquid.xyz/exchange";
 
+/* ---------- SIGN ---------- */
 function sign(action, nonce) {
-  const payload = JSON.stringify({ action, nonce });
+  const msg = JSON.stringify({ action, nonce });
   return (
     "0x" +
     crypto
       .createHash("sha256")
-      .update(payload + HL_PRIVATE_KEY.slice(2))
+      .update(msg + HL_PRIVATE_KEY.slice(2))
       .digest("hex")
   );
 }
 
+/* ---------- SEND ---------- */
 async function send(action) {
   const nonce = Date.now();
   const signature = sign(action, nonce);
@@ -59,27 +59,30 @@ async function send(action) {
   return text;
 }
 
+/* ---------- WEBHOOK ---------- */
 app.post("/webhook", async (req, res) => {
   try {
     const side = req.body.side;
-    if (!side) return res.status(400).json({ error: "missing side" });
+    if (!side) {
+      return res.status(400).json({ error: "missing side" });
+    }
 
     console.log("📩 WEBHOOK:", side);
 
-    // 1️⃣ SET LEVERAGE 10x CROSS
+    /* 1️⃣ SET LEVERAGE 10x CROSS */
     await send({
       type: "updateLeverage",
-      asset: 0,
+      asset: 0, // BTC
       isCross: true,
       leverage: 10,
     });
 
-    // 2️⃣ ORDER
+    /* 2️⃣ MARKET ORDER – ALL IN */
     await send({
       type: "order",
       orders: [
         {
-          asset: 0,
+          asset: 0, // BTC
           isBuy: side === "long",
           size: "ALL",
           limitPx: null,
@@ -90,12 +93,13 @@ app.post("/webhook", async (req, res) => {
     });
 
     res.json({ success: true });
-  } catch (e) {
-    console.error("❌ ERROR:", e.message);
-    res.status(500).json({ error: e.message });
+  } catch (err) {
+    console.error("❌ ERROR:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
+/* ---------- START ---------- */
 app.listen(PORT, () => {
   console.log("🚀 BOT LIVE on", PORT);
 });
