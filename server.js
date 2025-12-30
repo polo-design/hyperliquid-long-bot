@@ -1,119 +1,127 @@
 import express from "express";
+import bodyParser from "body-parser";
 import crypto from "crypto";
-import fetch from "node-fetch";
 
-const app = express();
-app.use(express.json());
-
+// ================= CONFIG =================
 const PORT = process.env.PORT || 10000;
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
-const ACCOUNT = process.env.ACCOUNT_ADDRESS;
+const PRIVATE_KEY = process.env.PRIVATE_KEY; // BEZ "0x0x", tylko 0x + hex
+const ACCOUNT = process.env.ACCOUNT;         // 0x...
+const SYMBOL = "BTC";                         // BTC-PERP
+const LEVERAGE = 1;                           // możesz zmienić
+const BASE_URL = "https://api.hyperliquid.xyz";
 
+// ================= SANITY CHECK =================
 if (!PRIVATE_KEY || !ACCOUNT) {
   console.error("❌ Missing ENV variables");
   process.exit(1);
 }
 
-console.log("✅ ETH ACCOUNT:", ACCOUNT);
+console.log("✅ ENV OK");
+console.log("👛 ACCOUNT:", ACCOUNT);
 
-// ====== HELPERS ======
-
-const API_URL = "https://api.hyperliquid.xyz";
-
-function signPayload(payload) {
-  const message = JSON.stringify(payload);
+// ================= HELPERS =================
+function signMessage(message) {
   return crypto
-    .createHmac("sha256", Buffer.from(PRIVATE_KEY, "hex"))
+    .createHmac("sha256", Buffer.from(PRIVATE_KEY.replace(/^0x/, ""), "hex"))
     .update(message)
     .digest("hex");
 }
 
-async function hlFetch(endpoint, body) {
-  const signature = signPayload(body);
+async function hlRequest(endpoint, payload) {
+  const body = JSON.stringify(payload);
+  const signature = signMessage(body);
 
-  const res = await fetch(API_URL + endpoint, {
+  console.log("➡️ REQUEST", endpoint);
+  console.log("➡️ PAYLOAD", payload);
+
+  const res = await fetch(`${BASE_URL}${endpoint}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "HL-ACCOUNT": ACCOUNT,
-      "HL-SIGNATURE": signature,
+      "HL-Account": ACCOUNT,
+      "HL-Signature": signature,
     },
-    body: JSON.stringify(body),
+    body,
   });
 
   const text = await res.text();
-  if (!res.ok) throw new Error(text);
-  return JSON.parse(text);
+
+  try {
+    const json = JSON.parse(text);
+    console.log("⬅️ RESPONSE", json);
+    return json;
+  } catch {
+    console.error("❌ NON-JSON RESPONSE:", text);
+    throw new Error("Invalid response");
+  }
 }
 
-// ====== CORE LOGIC ======
-
+// ================= HYPERLIQUID CALLS =================
 async function getBalance() {
-  const data = await hlFetch("/info", {
-    type: "userState",
+  const res = await hlRequest("/info", {
+    type: "accountState",
     user: ACCOUNT,
   });
 
-  return Number(data.marginSummary.availableMargin);
+  const usdc = Number(res.marginSummary?.accountValue || 0);
+  console.log("💰 BALANCE USDC:", usdc);
+  return usdc;
 }
 
-async function getBTCPrice() {
-  const data = await hlFetch("/info", {
-    type: "allMids",
-  });
-
-  return Number(data.BTC);
+async function getPrice() {
+  const res = await hlRequest("/info", { type: "allMids" });
+  const price = Number(res[`${SYMBOL}`]);
+  console.log("📈 PRICE:", price);
+  return price;
 }
 
-async function placeOrder(isBuy, size) {
+async function placeOrder(side) {
+  const balance = await getBalance();
+  if (balance <= 0) throw new Error("No balance");
+
+  const price = await getPrice();
+  const size = (balance * LEVERAGE) / price;
+
+  console.log("🧮 SIZE:", size);
+
   const order = {
     type: "order",
     orders: [
       {
-        asset: "BTC",
-        isBuy,
-        sz: size.toFixed(6),
-        limitPx: null,
-        orderType: "Market",
-        reduceOnly: false,
+        a: SYMBOL,
+        b: side === "long",
+        p: price,
+        s: size,
+        r: false,
       },
     ],
   };
 
-  return await hlFetch("/exchange", order);
+  return await hlRequest("/exchange", order);
 }
 
-// ====== WEBHOOK ======
+// ================= SERVER =================
+const app = express();
+app.use(bodyParser.json());
 
 app.post("/webhook", async (req, res) => {
   try {
-    const { side } = req.body;
+    console.log("📩 WEBHOOK:", req.body);
 
+    const { side } = req.body;
     if (!side || !["long", "short"].includes(side)) {
       return res.status(400).json({ error: "invalid payload" });
     }
 
-    console.log("📩 WEBHOOK:", side);
-
-    const balance = await getBalance();
-    const price = await getBTCPrice();
-
-    if (balance <= 0) throw new Error("No margin available");
-
-    const size = balance / price; // 100% kapitału
-    const isBuy = side === "long";
-
-    const result = await placeOrder(isBuy, size);
-
-    console.log("✅ ORDER SENT", result);
-    res.json({ status: "ok", size });
+    const result = await placeOrder(side);
+    res.json({ status: "ok", result });
   } catch (err) {
     console.error("❌ EXECUTION ERROR:", err.message);
     res.status(500).json({ error: "execution failed" });
   }
 });
 
-// ====== START ======
+app.get("/", (_, res) => res.send("BOT ONLINE"));
 
 app.listen(PORT, () => {
   console.log(`🚀 BOT LIVE on ${PORT}`);
