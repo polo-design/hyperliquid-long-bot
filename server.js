@@ -1,150 +1,165 @@
-/**
- * FINAL Hyperliquid Webhook Bot
- * - Node 18+/22 (native fetch)
- * - REAL orders (limit-as-market)
- * - 100% balance
- * - FULL DEBUG
- *
- * ENV REQUIRED:
- *  PRIVATE_KEY=0xabc... (ETH private key, JEDNO 0x)
- *  ACCOUNT=0xabc...     (ETH address)
- */
+// ================================
+// Hyperliquid REAL BOT – FINAL
+// ENV REQUIRED:
+// HL_PRIVATE_KEY
+// HL_ACCOUNT
+// PORT
+// ================================
 
-import express from "express";
 import crypto from "crypto";
-import { Wallet } from "ethers";
+import express from "express";
 
-const app = express();
-app.use(express.json());
+const {
+  HL_PRIVATE_KEY,
+  HL_ACCOUNT,
+  PORT = 10000,
+} = process.env;
 
-const PORT = process.env.PORT || 10000;
-const HL_URL = "https://api.hyperliquid.xyz";
-
-// ================== ENV CHECK ==================
-const { PRIVATE_KEY, ACCOUNT } = process.env;
-
-if (!PRIVATE_KEY || !ACCOUNT) {
+// ===== HARD FAIL IF ENV WRONG =====
+if (!HL_PRIVATE_KEY || !HL_ACCOUNT) {
   console.error("❌ Missing ENV variables");
   process.exit(1);
 }
 
-if (PRIVATE_KEY.startsWith("0x0x")) {
-  console.error("❌ PRIVATE_KEY has double 0x");
+if (!HL_PRIVATE_KEY.startsWith("0x")) {
+  console.error("❌ HL_PRIVATE_KEY must start with 0x");
   process.exit(1);
 }
 
-const wallet = new Wallet(PRIVATE_KEY);
 console.log("✅ ENV OK");
-console.log("👛 ACCOUNT:", ACCOUNT);
+console.log("👛 ACCOUNT:", HL_ACCOUNT);
 
-// ================== HELPERS ==================
-async function postHL(path, body) {
-  const res = await fetch(HL_URL + path, {
+// ===== CONSTANTS =====
+const BASE_URL = "https://api.hyperliquid.xyz";
+const SYMBOL = "BTC-USDC";
+const ASSET_ID = 0; // BTC = 0 on Hyperliquid
+
+// ===== HELPERS =====
+function signPayload(payload) {
+  const msg = JSON.stringify(payload);
+  return crypto
+    .createHmac("sha256", Buffer.from(HL_PRIVATE_KEY.slice(2), "hex"))
+    .update(msg)
+    .digest("hex");
+}
+
+async function hlFetch(path, body) {
+  const res = await fetch(`${BASE_URL}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 
   const text = await res.text();
+  let json;
   try {
-    return JSON.parse(text);
+    json = JSON.parse(text);
   } catch {
-    throw new Error("HL NON-JSON RESPONSE: " + text);
+    throw new Error(text);
   }
+
+  if (!res.ok) {
+    throw new Error(JSON.stringify(json));
+  }
+
+  return json;
 }
 
-function sign(payload) {
-  const msg = JSON.stringify(payload);
-  return wallet.signMessage(msg);
-}
-
-// ================== HL DATA ==================
-async function getBalance() {
-  const res = await postHL("/info", {
-    type: "clearinghouseState",
-    user: ACCOUNT,
+// ===== GET MARK PRICE =====
+async function getMarkPrice() {
+  const res = await hlFetch("/info", {
+    type: "allMids",
   });
 
-  const usdc = Number(res?.marginSummary?.accountValue || 0);
-  console.log("💰 BALANCE USDC:", usdc);
+  const price = Number(res.mids[SYMBOL]);
+  if (!price) throw new Error("No mark price");
+
+  return price;
+}
+
+// ===== GET ACCOUNT BALANCE =====
+async function getUsdcBalance() {
+  const res = await hlFetch("/info", {
+    type: "clearinghouseState",
+    user: HL_ACCOUNT,
+  });
+
+  const usdc = Number(res.marginSummary.accountValue);
+  if (!usdc || usdc <= 0) throw new Error("No balance");
+
   return usdc;
 }
 
-async function getMid() {
-  const res = await postHL("/info", { type: "allMids" });
-  const mid = Number(res?.BTC);
-  if (!mid) throw new Error("No BTC mid price");
-  console.log("📈 BTC MID:", mid);
-  return mid;
-}
-
-// ================== REAL ORDER ==================
+// ===== PLACE REAL ORDER =====
 async function placeOrder(side) {
-  console.log("🚀 REAL ORDER:", side);
+  const isBuy = side === "long";
 
-  const balance = await getBalance();
-  if (balance < 5) throw new Error("Balance too low");
+  const price = await getMarkPrice();
+  const balance = await getUsdcBalance();
 
-  const mid = await getMid();
-
-  const limitPx =
-    side === "long"
-      ? (mid * 1.05).toFixed(2)
-      : (mid * 0.95).toFixed(2);
-
-  const nonce = Date.now();
+  // use 100% balance
+  const size = +(balance / price).toFixed(4);
 
   const action = {
     type: "order",
     orders: [
       {
-        coin: "BTC",
-        isBuy: side === "long",
-        sz: balance,          // 100% balance
-        limitPx,              // ❗ NEVER NULL
-        reduceOnly: false,
-        orderType: "limit",   // ❗ limit-as-market
+        a: ASSET_ID,
+        b: isBuy,
+        p: price,
+        s: size,
+        r: false,
+        t: "market",
       },
     ],
   };
 
-  const payload = { action, nonce };
-  const signature = await sign(payload);
+  const payload = {
+    action,
+    nonce: Date.now(),
+    account: HL_ACCOUNT,
+  };
 
-  console.log("📤 PAYLOAD:", JSON.stringify(payload, null, 2));
+  const signature = signPayload(payload);
+
+  console.log("📦 PAYLOAD:", JSON.stringify(payload, null, 2));
   console.log("✍️ SIGNATURE:", signature);
 
-  const res = await postHL("/exchange", {
-    ...payload,
+  const result = await hlFetch("/exchange", {
+    payload,
     signature,
   });
 
-  console.log("📥 HL RESPONSE:", JSON.stringify(res, null, 2));
-  return res;
+  return result;
 }
 
-// ================== WEBHOOK ==================
+// ===== EXPRESS =====
+const app = express();
+app.use(express.json());
+
 app.post("/webhook", async (req, res) => {
   try {
     const { side } = req.body;
-    console.log("📩 WEBHOOK:", req.body);
-
-    if (side !== "long" && side !== "short") {
+    if (!side || !["long", "short"].includes(side)) {
       return res.status(400).json({ error: "invalid payload" });
     }
 
+    console.log("🚀 REAL ORDER:", side);
+
     const result = await placeOrder(side);
+
+    console.log("✅ ORDER RESULT:", result);
+
     res.json({ success: true, result });
-  } catch (e) {
-    console.error("❌ EXECUTION ERROR:", e.message || e);
+  } catch (err) {
+    console.error("❌ EXECUTION ERROR:", err.message);
     res.status(500).json({
       error: "execution failed",
-      details: e.message || String(e),
+      details: err.message,
     });
   }
 });
 
-// ================== START ==================
 app.listen(PORT, () => {
   console.log(`🚀 BOT LIVE on ${PORT}`);
 });
