@@ -11,17 +11,16 @@ const ACCOUNT = process.env.HL_ACCOUNT;
 const PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
 
 if (!ACCOUNT || !PRIVATE_KEY) {
-  console.error("❌ Missing ENV variables");
+  console.error("❌ Missing ENV");
   process.exit(1);
 }
 
 console.log("✅ ENV OK");
 console.log("👛 ACCOUNT:", ACCOUNT);
 
-/* =========================
-   LOW-LEVEL HTTPS REQUEST
-========================= */
-function hlRequest(path, body) {
+/* ================= HTTPS ================= */
+
+function postHL(path, body) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
 
@@ -37,7 +36,7 @@ function hlRequest(path, body) {
       },
       (res) => {
         let out = "";
-        res.on("data", (d) => (out += d));
+        res.on("data", (c) => (out += c));
         res.on("end", () => {
           try {
             resolve(JSON.parse(out));
@@ -54,102 +53,84 @@ function hlRequest(path, body) {
   });
 }
 
-/* =========================
-   SIGN PAYLOAD (HL STYLE)
-========================= */
-function signPayload(payload) {
+/* ================= SIGN ================= */
+
+function sign(payload) {
   const msg = JSON.stringify(payload);
   const hash = crypto.createHash("sha256").update(msg).digest();
-
-  const sign = crypto.createSign("RSA-SHA256");
-  sign.update(hash);
-  sign.end();
-
-  // HL expects secp256k1 raw signature → simulate via ECDSA
-  const signature = crypto
-    .createHmac("sha256", Buffer.from(PRIVATE_KEY, "hex"))
-    .update(hash)
-    .digest("hex");
-
-  return signature;
+  return (
+    "0x" +
+    crypto
+      .createHmac("sha256", Buffer.from(PRIVATE_KEY, "hex"))
+      .update(hash)
+      .digest("hex")
+  );
 }
 
-/* =========================
-   GET ACCOUNT STATE
-========================= */
-async function getAccountState() {
-  return hlRequest("/info", {
+/* ================= BALANCE ================= */
+
+async function getBalance() {
+  const res = await postHL("/info", {
     type: "accountState",
     user: ACCOUNT,
   });
+
+  return Number(res?.marginSummary?.accountValue || 0);
 }
 
-/* =========================
-   PLACE REAL ORDER
-========================= */
+/* ================= ORDER ================= */
+
 async function placeOrder(side) {
-  console.log("🚀 REAL ORDER:", side);
+  const balance = await getBalance();
+  if (balance < 5) throw "Balance too low";
 
-  const state = await getAccountState();
+  const nonce = Date.now();
 
-  const usdc =
-    state?.marginSummary?.accountValue ??
-    state?.crossMarginSummary?.accountValue;
-
-  if (!usdc || usdc <= 5) {
-    throw new Error("Balance too low");
-  }
-
-  console.log("💰 USDC:", usdc);
-
-  const order = {
-    a: ACCOUNT,
-    b: {
-      coin: "BTC",
-      isBuy: side === "long",
-      sz: usdc, // ALL IN
-      limitPx: null, // MARKET
-      reduceOnly: false,
-    },
-    t: Date.now(),
+  const action = {
+    type: "order",
+    orders: [
+      {
+        coin: "BTC",
+        isBuy: side === "long",
+        sz: balance,      // ALL IN
+        limitPx: null,    // MARKET
+        reduceOnly: false,
+        orderType: "market",
+      },
+    ],
   };
 
-  const sig = signPayload(order);
+  const payload = { action, nonce };
+  const signature = sign(payload);
 
-  const payload = {
-    action: "placeOrder",
-    order,
-    signature: sig,
-  };
+  console.log("📤 ORDER:", payload);
 
-  console.log("📤 SEND ORDER:", payload);
-
-  return hlRequest("/exchange", payload);
+  return postHL("/exchange", {
+    ...payload,
+    signature,
+  });
 }
 
-/* =========================
-   WEBHOOK
-========================= */
+/* ================= WEBHOOK ================= */
+
 app.post("/webhook", async (req, res) => {
   try {
     const { side } = req.body;
-    if (!side || !["long", "short"].includes(side)) {
+    if (!["long", "short"].includes(side))
       return res.status(400).json({ error: "invalid payload" });
-    }
 
     const result = await placeOrder(side);
+    console.log("✅ RESULT:", result);
 
-    console.log("✅ ORDER RESULT:", result);
     res.json({ success: true, result });
-  } catch (err) {
-    console.error("❌ EXECUTION ERROR:", err);
-    res.status(500).json({ error: "execution failed", details: String(err) });
+  } catch (e) {
+    console.error("❌ ERROR:", e);
+    res.status(500).json({ error: "execution failed", details: String(e) });
   }
 });
 
-/* =========================
-   START
-========================= */
+/* ================= START ================= */
+
 app.listen(PORT, () => {
-  console.log(`🚀 BOT LIVE on ${PORT}`);
+  console.log("🚀 BOT LIVE on", PORT);
 });
