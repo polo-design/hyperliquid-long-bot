@@ -1,88 +1,96 @@
+/**
+ * FINAL Hyperliquid Webhook Bot
+ * - Node 18+/22 (native fetch)
+ * - REAL orders (limit-as-market)
+ * - 100% balance
+ * - FULL DEBUG
+ *
+ * ENV REQUIRED:
+ *  PRIVATE_KEY=0xabc... (ETH private key, JEDNO 0x)
+ *  ACCOUNT=0xabc...     (ETH address)
+ */
+
 import express from "express";
 import crypto from "crypto";
-import https from "https";
+import { Wallet } from "ethers";
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
+const HL_URL = "https://api.hyperliquid.xyz";
 
-const ACCOUNT = process.env.HL_ACCOUNT;
-const PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
+// ================== ENV CHECK ==================
+const { PRIVATE_KEY, ACCOUNT } = process.env;
 
-if (!ACCOUNT || !PRIVATE_KEY) {
-  console.error("❌ Missing ENV");
+if (!PRIVATE_KEY || !ACCOUNT) {
+  console.error("❌ Missing ENV variables");
   process.exit(1);
 }
 
+if (PRIVATE_KEY.startsWith("0x0x")) {
+  console.error("❌ PRIVATE_KEY has double 0x");
+  process.exit(1);
+}
+
+const wallet = new Wallet(PRIVATE_KEY);
 console.log("✅ ENV OK");
 console.log("👛 ACCOUNT:", ACCOUNT);
 
-/* ================= HTTPS ================= */
-
-function postHL(path, body) {
-  return new Promise((resolve, reject) => {
-    const data = JSON.stringify(body);
-
-    const req = https.request(
-      {
-        hostname: "api.hyperliquid.xyz",
-        path,
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(data),
-        },
-      },
-      (res) => {
-        let out = "";
-        res.on("data", (c) => (out += c));
-        res.on("end", () => {
-          try {
-            resolve(JSON.parse(out));
-          } catch {
-            reject(out);
-          }
-        });
-      }
-    );
-
-    req.on("error", reject);
-    req.write(data);
-    req.end();
+// ================== HELPERS ==================
+async function postHL(path, body) {
+  const res = await fetch(HL_URL + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
-}
 
-/* ================= SIGN ================= */
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("HL NON-JSON RESPONSE: " + text);
+  }
+}
 
 function sign(payload) {
   const msg = JSON.stringify(payload);
-  const hash = crypto.createHash("sha256").update(msg).digest();
-  return (
-    "0x" +
-    crypto
-      .createHmac("sha256", Buffer.from(PRIVATE_KEY, "hex"))
-      .update(hash)
-      .digest("hex")
-  );
+  return wallet.signMessage(msg);
 }
 
-/* ================= BALANCE ================= */
-
+// ================== HL DATA ==================
 async function getBalance() {
   const res = await postHL("/info", {
-    type: "accountState",
+    type: "clearinghouseState",
     user: ACCOUNT,
   });
 
-  return Number(res?.marginSummary?.accountValue || 0);
+  const usdc = Number(res?.marginSummary?.accountValue || 0);
+  console.log("💰 BALANCE USDC:", usdc);
+  return usdc;
 }
 
-/* ================= ORDER ================= */
+async function getMid() {
+  const res = await postHL("/info", { type: "allMids" });
+  const mid = Number(res?.BTC);
+  if (!mid) throw new Error("No BTC mid price");
+  console.log("📈 BTC MID:", mid);
+  return mid;
+}
 
+// ================== REAL ORDER ==================
 async function placeOrder(side) {
+  console.log("🚀 REAL ORDER:", side);
+
   const balance = await getBalance();
-  if (balance < 5) throw "Balance too low";
+  if (balance < 5) throw new Error("Balance too low");
+
+  const mid = await getMid();
+
+  const limitPx =
+    side === "long"
+      ? (mid * 1.05).toFixed(2)
+      : (mid * 0.95).toFixed(2);
 
   const nonce = Date.now();
 
@@ -92,45 +100,51 @@ async function placeOrder(side) {
       {
         coin: "BTC",
         isBuy: side === "long",
-        sz: balance,      // ALL IN
-        limitPx: null,    // MARKET
+        sz: balance,          // 100% balance
+        limitPx,              // ❗ NEVER NULL
         reduceOnly: false,
-        orderType: "market",
+        orderType: "limit",   // ❗ limit-as-market
       },
     ],
   };
 
   const payload = { action, nonce };
-  const signature = sign(payload);
+  const signature = await sign(payload);
 
-  console.log("📤 ORDER:", payload);
+  console.log("📤 PAYLOAD:", JSON.stringify(payload, null, 2));
+  console.log("✍️ SIGNATURE:", signature);
 
-  return postHL("/exchange", {
+  const res = await postHL("/exchange", {
     ...payload,
     signature,
   });
+
+  console.log("📥 HL RESPONSE:", JSON.stringify(res, null, 2));
+  return res;
 }
 
-/* ================= WEBHOOK ================= */
-
+// ================== WEBHOOK ==================
 app.post("/webhook", async (req, res) => {
   try {
     const { side } = req.body;
-    if (!["long", "short"].includes(side))
+    console.log("📩 WEBHOOK:", req.body);
+
+    if (side !== "long" && side !== "short") {
       return res.status(400).json({ error: "invalid payload" });
+    }
 
     const result = await placeOrder(side);
-    console.log("✅ RESULT:", result);
-
     res.json({ success: true, result });
   } catch (e) {
-    console.error("❌ ERROR:", e);
-    res.status(500).json({ error: "execution failed", details: String(e) });
+    console.error("❌ EXECUTION ERROR:", e.message || e);
+    res.status(500).json({
+      error: "execution failed",
+      details: e.message || String(e),
+    });
   }
 });
 
-/* ================= START ================= */
-
+// ================== START ==================
 app.listen(PORT, () => {
-  console.log("🚀 BOT LIVE on", PORT);
+  console.log(`🚀 BOT LIVE on ${PORT}`);
 });
