@@ -1,120 +1,94 @@
-import express from "express";
-import crypto from "crypto";
-import { Wallet } from "ethers";
+// server.js - Hyperliquid Long Bot
+// Zakładając zainstalowane biblioteki: express, dotenv, hyperliquid
+require('dotenv').config();
+const express = require('express');
+const { Hyperliquid } = require('hyperliquid');
 
+const PORT = 10000;
 const app = express();
 app.use(express.json());
 
-// =====================
-// ENV
-// =====================
-const PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
-const ACCOUNT = process.env.HL_ACCOUNT;
-const PORT = process.env.PORT || 10000;
+// Wczytanie danych z ENV
+const HL_PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
+const HL_ACCOUNT = process.env.HL_ACCOUNT;
 
-if (!PRIVATE_KEY || !ACCOUNT) {
-  console.error("❌ Missing ENV variables");
-  process.exit(1);
-}
-if (!PRIVATE_KEY.startsWith("0x")) {
-  console.error("❌ HL_PRIVATE_KEY must start with 0x");
+if (!HL_PRIVATE_KEY || !HL_ACCOUNT) {
+  console.error('[Init] Brak HL_PRIVATE_KEY lub HL_ACCOUNT w zmiennych środowiskowych.');
   process.exit(1);
 }
 
-const wallet = new Wallet(PRIVATE_KEY);
+// Inicjalizacja klienta Hyperliquid SDK
+const sdk = new Hyperliquid({
+  privateKey: HL_PRIVATE_KEY,
+  // Jeśli to konieczne, można dodać opcję testnet: true,
+  walletAddress: HL_ACCOUNT,
+  enableWs: false // wyłącz websocket (opcjonalne, jeśli nie używamy websocket)
+});
 
-console.log("✅ ENV OK");
-console.log("👛 ACCOUNT:", ACCOUNT);
+console.log(`[Init] Serwer wystartowany na porcie ${PORT}. HL_ACCOUNT: ${HL_ACCOUNT}`);
 
-// =====================
-// CONSTANTS
-// =====================
-const HL_URL = "https://api.hyperliquid.xyz/exchange";
-const BTC = 0;
-const LEVERAGE = 10;
-const SIZE = "0.001"; // MINIMALNY, PEWNY ROZMIAR
-
-// =====================
-// SIGN
-// =====================
-function sign(payload) {
-  const hash = crypto
-    .createHash("sha256")
-    .update(JSON.stringify(payload))
-    .digest();
-  return wallet.signMessage(hash);
-}
-
-// =====================
-// SEND
-// =====================
-async function send(payload) {
-  const signature = await sign(payload);
-
-  console.log("📤 HL PAYLOAD:", JSON.stringify(payload, null, 2));
-  console.log("✍️ SIGNATURE:", signature);
-
-  const res = await fetch(HL_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-API-SIGNATURE": signature,
-      "X-API-ADDRESS": ACCOUNT
-    },
-    body: JSON.stringify(payload)
-  });
-
-  const text = await res.text();
-  console.log("📥 HL RESPONSE:", text);
-  return text;
-}
-
-// =====================
-// WEBHOOK
-// =====================
-app.post("/webhook", async (req, res) => {
+app.post('/webhook', async (req, res) => {
   try {
-    const { side } = req.body;
-    if (!["long", "short"].includes(side)) {
-      return res.status(400).json({ error: "invalid side" });
+    console.log('[Webhook] Odebrano żądanie POST /webhook:', req.body);
+    const side = req.body.side;
+    if (side !== 'long') {
+      console.log('[Webhook] Pomijam, strona nie jest "long".');
+      return res.status(400).send({ error: 'Nieobsługiwany side' });
     }
 
-    console.log("📩 WEBHOOK:", side.toUpperCase());
+    // Pobranie stanu konta (saldo) z Hyperliquid
+    console.log('[Info] Pobieranie stanu konta użytkownika...');
+    const state = await sdk.info.perpetuals.getClearinghouseState(HL_ACCOUNT);
+    // Używamy crossMarginSummary.accountValue jako przybliżone saldo w USD
+    const balanceStr = state.crossMarginSummary.accountValue;
+    const balance = parseFloat(balanceStr);
+    console.log(`[Info] Saldo konta (USD): ${balance}`);
 
-    // 1️⃣ SET LEVERAGE
-    await send({
-      type: "updateLeverage",
-      asset: BTC,
-      leverage: LEVERAGE,
-      isCross: true
+    // Pobranie aktualnej ceny rynkowej instrumentu
+    console.log('[Info] Pobieranie aktualnej ceny rynkowej instrumentu...');
+    const allMids = await sdk.info.getAllMids();
+    // Ustaw tutaj interesujący nas instrument, np. 'BTC-PERP'
+    const coin = 'BTC-PERP';
+    let price;
+    if (allMids.perpetuals && allMids.perpetuals[coin]) {
+      price = parseFloat(allMids.perpetuals[coin]);
+    } else if (allMids[coin]) {
+      // starsze wersje SDK mogły zwracać allMids bez podziału na kategorie
+      price = parseFloat(allMids[coin]);
+    }
+    if (!price) {
+      console.error('[Error] Nie udało się pobrać ceny dla', coin);
+      return res.status(500).send({ error: 'Nie można pobrać ceny instrumentu' });
+    }
+    console.log(`[Info] Aktualna cena ${coin}: ${price}`);
+
+    // Wyliczenie wielkości pozycji (100% salda)
+    // Uwaga: należy uwzględnić bieżącą ustawioną dźwignię konta, jeśli używana
+    const leverage = 1; // przykładowa wartość; zakładamy brak modyfikacji w kodzie
+    console.log(`[Info] Ustawiona dźwignia: ${leverage}x`);
+    const size = ((balance * leverage) / price).toFixed(6);
+    console.log(`[Calc] Wyliczona wielkość pozycji: ${size}`);
+
+    // Przygotowanie i wysłanie zlecenia typu market (jako IOC)
+    console.log(`[Order] Wysyłanie zlecenia typu market (long) dla ${coin}...`);
+    // Limit price ustawiamy znacznie powyżej aktualnej ceny, aby zapewnić realizację
+    const limitPx = price * 2;
+    const orderResp = await sdk.exchange.placeOrder({
+      coin: coin,
+      is_buy: true,
+      sz: size,
+      limit_px: limitPx,
+      order_type: { limit: { tif: 'Ioc' } },
+      reduce_only: false
     });
-
-    // 2️⃣ REAL MARKET ORDER (POPRAWNY)
-    const order = {
-      type: "order",
-      orders: [
-        {
-          a: BTC,                 // asset
-          b: side === "long",     // buy / sell
-          p: null,                // MARKET
-          s: SIZE,                // SIZE (STRING)
-          r: false,               // not reduce
-          tif: "Ioc",             // REQUIRED
-          cloid: crypto.randomUUID() // REQUIRED
-        }
-      ]
-    };
-
-    const result = await send(order);
-
-    res.json({ success: true, result });
-  } catch (e) {
-    console.error("❌ ERROR:", e.message);
-    res.status(500).json({ error: e.message });
+    console.log('[Success] Zlecenie wysłane pomyślnie:', orderResp);
+    return res.status(200).send({ result: 'order sent', data: orderResp });
+  } catch (error) {
+    console.error('[Error] Wystąpił błąd podczas przetwarzania webhooka:', error);
+    return res.status(500).send({ error: error.message });
   }
 });
 
-// =====================
 app.listen(PORT, () => {
-  console.log(`🚀 BOT LIVE on ${PORT}`);
+  console.log(`[Start] Bot nasłuchuje na porcie ${PORT}, gotowy do pracy!`);
 });
