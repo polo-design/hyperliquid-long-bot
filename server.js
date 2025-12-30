@@ -1,128 +1,126 @@
-import express from "express";
-import bodyParser from "body-parser";
+// server.js
+import http from "http";
 import crypto from "crypto";
 
-// ================= CONFIG =================
+// ================== CONFIG ==================
 const PORT = process.env.PORT || 10000;
-const PRIVATE_KEY = process.env.PRIVATE_KEY; // BEZ "0x0x", tylko 0x + hex
-const ACCOUNT = process.env.ACCOUNT;         // 0x...
-const SYMBOL = "BTC";                         // BTC-PERP
-const LEVERAGE = 1;                           // możesz zmienić
-const BASE_URL = "https://api.hyperliquid.xyz";
 
-// ================= SANITY CHECK =================
-if (!PRIVATE_KEY || !ACCOUNT) {
+// UŻYWAMY DOKŁADNIE TYCH NAZW
+const ACCOUNT = process.env.HL_ACCOUNT;
+const PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
+
+// ================== STARTUP CHECK ==================
+console.log("🔍 STARTING BOT...");
+console.log("🔍 ENV CHECK:");
+
+if (!ACCOUNT || !PRIVATE_KEY) {
   console.error("❌ Missing ENV variables");
+  console.error("ACCOUNT:", ACCOUNT);
+  console.error("PRIVATE_KEY:", PRIVATE_KEY ? "OK" : "MISSING");
   process.exit(1);
 }
 
 console.log("✅ ENV OK");
 console.log("👛 ACCOUNT:", ACCOUNT);
 
-// ================= HELPERS =================
-function signMessage(message) {
+// sanity check private key
+if (!/^[0-9a-fA-F]{64}$/.test(PRIVATE_KEY)) {
+  console.error("❌ PRIVATE_KEY must be 64 hex chars, WITHOUT 0x");
+  process.exit(1);
+}
+
+console.log("🔑 PRIVATE KEY FORMAT OK");
+
+// ================== HELPERS ==================
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", chunk => (data += chunk));
+    req.on("end", () => resolve(data));
+    req.on("error", reject);
+  });
+}
+
+function sign(payload) {
   return crypto
-    .createHmac("sha256", Buffer.from(PRIVATE_KEY.replace(/^0x/, ""), "hex"))
-    .update(message)
+    .createHmac("sha256", Buffer.from(PRIVATE_KEY, "hex"))
+    .update(JSON.stringify(payload))
     .digest("hex");
 }
 
-async function hlRequest(endpoint, payload) {
-  const body = JSON.stringify(payload);
-  const signature = signMessage(body);
-
-  console.log("➡️ REQUEST", endpoint);
-  console.log("➡️ PAYLOAD", payload);
-
-  const res = await fetch(`${BASE_URL}${endpoint}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "HL-Account": ACCOUNT,
-      "HL-Signature": signature,
-    },
-    body,
-  });
-
-  const text = await res.text();
-
-  try {
-    const json = JSON.parse(text);
-    console.log("⬅️ RESPONSE", json);
-    return json;
-  } catch {
-    console.error("❌ NON-JSON RESPONSE:", text);
-    throw new Error("Invalid response");
-  }
-}
-
-// ================= HYPERLIQUID CALLS =================
-async function getBalance() {
-  const res = await hlRequest("/info", {
-    type: "accountState",
-    user: ACCOUNT,
-  });
-
-  const usdc = Number(res.marginSummary?.accountValue || 0);
-  console.log("💰 BALANCE USDC:", usdc);
-  return usdc;
-}
-
-async function getPrice() {
-  const res = await hlRequest("/info", { type: "allMids" });
-  const price = Number(res[`${SYMBOL}`]);
-  console.log("📈 PRICE:", price);
-  return price;
-}
-
+// ================== HYPERLIQUID CALL (DEBUG MODE) ==================
 async function placeOrder(side) {
-  const balance = await getBalance();
-  if (balance <= 0) throw new Error("No balance");
+  console.log("🧠 placeOrder() called");
+  console.log("➡️ SIDE:", side);
 
-  const price = await getPrice();
-  const size = (balance * LEVERAGE) / price;
+  // 👉 TU NORMALNIE IDZIE PRAWDZIWE API HL
+  // Na razie robimy DEBUG SAFE MODE,
+  // żebyś WIDZIAŁ że flow działa do końca
 
-  console.log("🧮 SIZE:", size);
-
-  const order = {
-    type: "order",
-    orders: [
-      {
-        a: SYMBOL,
-        b: side === "long",
-        p: price,
-        s: size,
-        r: false,
-      },
-    ],
+  const payload = {
+    account: ACCOUNT,
+    symbol: "BTC-USDC",
+    side,
+    sizeMode: "ALL", // 100% salda
+    timestamp: Date.now(),
   };
 
-  return await hlRequest("/exchange", order);
+  const signature = sign(payload);
+
+  console.log("📦 PAYLOAD:", payload);
+  console.log("✍️ SIGNATURE:", signature);
+
+  // TU BĘDZIE fetch do Hyperliquid
+  // (na razie tylko symulacja sukcesu)
+  return {
+    ok: true,
+    simulated: true,
+    payload,
+  };
 }
 
-// ================= SERVER =================
-const app = express();
-app.use(bodyParser.json());
+// ================== HTTP SERVER ==================
+const server = http.createServer(async (req, res) => {
+  if (req.method === "POST" && req.url === "/webhook") {
+    console.log("📩 WEBHOOK RECEIVED");
 
-app.post("/webhook", async (req, res) => {
-  try {
-    console.log("📩 WEBHOOK:", req.body);
+    try {
+      const raw = await readBody(req);
+      console.log("📨 RAW BODY:", raw);
 
-    const { side } = req.body;
-    if (!side || !["long", "short"].includes(side)) {
-      return res.status(400).json({ error: "invalid payload" });
+      let json;
+      try {
+        json = JSON.parse(raw);
+      } catch {
+        console.error("❌ INVALID JSON");
+        res.writeHead(400);
+        return res.end(JSON.stringify({ error: "invalid json" }));
+      }
+
+      const { side } = json;
+      if (!side || !["long", "short"].includes(side)) {
+        console.error("❌ INVALID PAYLOAD", json);
+        res.writeHead(400);
+        return res.end(JSON.stringify({ error: "invalid payload" }));
+      }
+
+      const result = await placeOrder(side);
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: true, result }));
+    } catch (err) {
+      console.error("❌ EXECUTION ERROR:", err);
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: "execution failed" }));
     }
-
-    const result = await placeOrder(side);
-    res.json({ status: "ok", result });
-  } catch (err) {
-    console.error("❌ EXECUTION ERROR:", err.message);
-    res.status(500).json({ error: "execution failed" });
+    return;
   }
+
+  // healthcheck
+  res.writeHead(200);
+  res.end("OK");
 });
 
-app.get("/", (_, res) => res.send("BOT ONLINE"));
-
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`🚀 BOT LIVE on ${PORT}`);
 });
