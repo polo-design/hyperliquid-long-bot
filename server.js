@@ -6,28 +6,16 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// =======================
-// ENV
-// =======================
-const HL_ACCOUNT = process.env.HL_ACCOUNT;
 const HL_PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
+const HL_ACCOUNT = process.env.HL_ACCOUNT;
 
-if (!HL_ACCOUNT || !HL_PRIVATE_KEY) {
+if (!HL_PRIVATE_KEY || !HL_ACCOUNT) {
   console.error("❌ Missing ENV variables");
   process.exit(1);
 }
 
-console.log("✅ ENV OK");
-console.log("👛 ACCOUNT:", HL_ACCOUNT);
+const API_URL = "https://api.hyperliquid.xyz";
 
-// =======================
-// HYPERLIQUID CONFIG
-// =======================
-const HL_API = "https://api.hyperliquid.xyz";
-
-// =======================
-// SIGN HELPERS
-// =======================
 function sign(payload) {
   return crypto
     .createHmac("sha256", Buffer.from(HL_PRIVATE_KEY, "hex"))
@@ -35,71 +23,42 @@ function sign(payload) {
     .digest("hex");
 }
 
-async function hlPost(body) {
-  const payload = JSON.stringify({
-    ...body,
-    nonce: Date.now(),
-  });
+async function sendOrder(isBuy) {
+  const body = {
+    type: "order",
+    orders: [
+      {
+        asset: "BTC-USDC",          // 🔥 WAŻNE
+        isBuy,
+        reduceOnly: !isBuy,
+        orderType: { market: {} },
+        sz: 0.001                   // 🔥 TESTOWO MAŁY SIZE
+      }
+    ]
+  };
 
-  const signature = sign(payload);
+  body.nonce = Date.now();
+  const payload = JSON.stringify(body);
 
-  const res = await fetch(`${HL_API}/exchange`, {
+  const res = await fetch(API_URL + "/exchange", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Signature": signature,
-      "X-Wallet": HL_ACCOUNT,
+      "X-Signature": sign(payload),
+      "X-Wallet": HL_ACCOUNT
     },
-    body: payload,
+    body: payload
   });
 
   const text = await res.text();
 
-  // 🔴 to był TWÓJ błąd wcześniej:
-  // API czasem zwraca tekst, nie JSON
-  try {
-    return JSON.parse(text);
-  } catch {
+  if (!res.ok) {
     throw new Error(text);
   }
+
+  return text;
 }
 
-// =======================
-// ORDERS
-// =======================
-async function openLong() {
-  return hlPost({
-    type: "order",
-    orders: [
-      {
-        asset: "BTC",
-        isBuy: true,
-        reduceOnly: false,
-        orderType: { market: {} },
-        sz: "ALL",
-      },
-    ],
-  });
-}
-
-async function closePosition() {
-  return hlPost({
-    type: "order",
-    orders: [
-      {
-        asset: "BTC",
-        isBuy: false,
-        reduceOnly: true,
-        orderType: { market: {} },
-        sz: "ALL",
-      },
-    ],
-  });
-}
-
-// =======================
-// WEBHOOK
-// =======================
 app.post("/webhook", async (req, res) => {
   const { side } = req.body;
 
@@ -107,26 +66,24 @@ app.post("/webhook", async (req, res) => {
 
   try {
     if (side === "long") {
-      const r = await openLong();
-      return res.json({ status: "sent", side, result: r });
+      const r = await sendOrder(true);
+      return res.json({ status: "sent", side, response: r });
     }
 
     if (side === "short") {
-      const r = await closePosition();
-      return res.json({ status: "sent", side, result: r });
+      const r = await sendOrder(false);
+      return res.json({ status: "closed", side, response: r });
     }
 
     return res.status(400).json({ error: "invalid payload" });
-  } catch (err) {
-    console.error("❌ EXECUTION ERROR:", err.message);
+  } catch (e) {
+    console.error("❌ EXECUTION ERROR:", e.message);
     return res.status(500).json({ error: "execution failed" });
   }
 });
 
-app.get("/", (_, res) => {
-  res.json({ status: "alive" });
-});
+app.get("/", (_, res) => res.json({ status: "alive" }));
 
 app.listen(PORT, () => {
-  console.log(`🚀 BOT LIVE on ${PORT}`);
+  console.log("🚀 BOT LIVE on", PORT);
 });
