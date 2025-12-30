@@ -1,13 +1,12 @@
 import express from "express";
-import fetch from "node-fetch";
 import { Wallet } from "ethers";
 
 const app = express();
 app.use(express.json());
 
-/* ===================== CONFIG ===================== */
+/* ================= CONFIG ================= */
 
-const PRIVATE_KEY = process.env.PRIVATE_KEY; // BEZ "0x0x"
+const PRIVATE_KEY = process.env.PRIVATE_KEY;
 if (!PRIVATE_KEY) {
   console.error("❌ Missing PRIVATE_KEY");
   process.exit(1);
@@ -16,11 +15,11 @@ if (!PRIVATE_KEY) {
 const wallet = new Wallet(PRIVATE_KEY);
 const ACCOUNT = wallet.address.toLowerCase();
 
-console.log("✅ETH ACCOUNT:", ACCOUNT);
+console.log("✅ ETH ACCOUNT:", ACCOUNT);
 
-/* ===================== HELPERS ===================== */
+/* ================= FETCH ================= */
 
-async function hlRequest(body) {
+async function hl(body) {
   const res = await fetch("https://api.hyperliquid.xyz/exchange", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -35,33 +34,29 @@ async function hlRequest(body) {
   }
 }
 
-/* ===================== ACCOUNT ===================== */
+/* ================= DATA ================= */
 
-async function getAccountState() {
-  return hlRequest({
-    type: "accountState",
-    user: ACCOUNT,
-  });
+async function getAccountValue() {
+  const r = await hl({ type: "accountState", user: ACCOUNT });
+  return Number(r.marginSummary.accountValue);
 }
 
-async function getMidPrice() {
-  const res = await hlRequest({ type: "allMids" });
-  return Number(res["BTC-USDC"]);
+async function getPrice() {
+  const r = await hl({ type: "allMids" });
+  return Number(r["BTC-USDC"]);
 }
 
-/* ===================== ORDER ===================== */
+/* ================= ORDER ================= */
 
 async function openLong100() {
-  const state = await getAccountState();
-  const usdc = Number(state.marginSummary.accountValue);
-
+  const usdc = await getAccountValue();
   if (usdc <= 0) throw new Error("NO BALANCE");
 
-  const price = await getMidPrice();
+  const price = await getPrice();
   const size = Number((usdc / price).toFixed(6));
 
-  console.log("USDC:", usdc);
-  console.log("BTC SIZE:", size);
+  console.log("💰 USDC:", usdc);
+  console.log("📦 BTC SIZE:", size);
 
   const nonce = Date.now();
 
@@ -74,8 +69,8 @@ async function openLong100() {
         sz: size,
         limitPx: price * 1.01,
         orderType: "limit",
-        reduceOnly: false,
         tif: "Gtc",
+        reduceOnly: false,
       },
     ],
   };
@@ -84,32 +79,23 @@ async function openLong100() {
     JSON.stringify({ action, nonce })
   );
 
-  return hlRequest({
-    action,
-    nonce,
-    signature,
-    user: ACCOUNT,
-  });
+  return hl({ action, nonce, signature, user: ACCOUNT });
 }
 
-/* ===================== WEBHOOK ===================== */
+/* ================= WEBHOOK ================= */
 
 app.post("/webhook", async (req, res) => {
   try {
-    const { side } = req.body;
-
-    if (side !== "long") {
+    if (req.body.side !== "long") {
       return res.status(422).json({ error: "invalid payload" });
     }
 
-    console.log("📩 WEBHOOK:", side);
+    console.log("📩 WEBHOOK: LONG");
 
-    const result = await openLong100();
-
-    console.log("✅ ORDER SENT");
-    return res.json({ status: "ok", result });
-  } catch (err) {
-    console.error("❌ EXECUTION ERROR:", err.message);
+    const r = await openLong100();
+    return res.json({ status: "ok", r });
+  } catch (e) {
+    console.error("❌ EXECUTION ERROR:", e.message);
     return res.status(500).json({ error: "execution failed" });
   }
 });
