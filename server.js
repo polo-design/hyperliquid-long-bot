@@ -5,147 +5,120 @@ import { ethers } from "ethers";
 const app = express();
 app.use(express.json());
 
-/* =======================
-   ENV CHECK
-======================= */
+/* ================= ENV ================= */
 const ACCOUNT = process.env.HL_ACCOUNT;
-const PRIVATE_KEY_RAW = process.env.HL_PRIVATE_KEY;
+const PK_RAW = process.env.HL_PRIVATE_KEY;
 
-if (!ACCOUNT || !PRIVATE_KEY_RAW) {
-  console.error("❌ Missing ENV variables");
+if (!ACCOUNT || !PK_RAW) {
+  console.error("❌ Missing ENV");
   process.exit(1);
 }
 
-if (PRIVATE_KEY_RAW.startsWith("0x")) {
-  console.error("❌ HL_PRIVATE_KEY MUST be WITHOUT 0x");
-  process.exit(1);
-}
-
-const PRIVATE_KEY = "0x" + PRIVATE_KEY_RAW;
-const wallet = new ethers.Wallet(PRIVATE_KEY);
-
+const wallet = new ethers.Wallet("0x" + PK_RAW);
 console.log("✅ ENV OK");
 console.log("👛 ACCOUNT:", wallet.address);
 
-/* =======================
-   CONSTANTS
-======================= */
-const HL_API = "https://api.hyperliquid.xyz";
-const SYMBOL = "BTC-USDC";
-const ASSET = 0;          // BTC index
-const LEVERAGE = 10;      // <<< 10x
+/* ================= CONST ================= */
+const HL = "https://api.hyperliquid.xyz";
+const ASSET = 0;          // BTC
+const LEVERAGE = 10;
 const PORT = process.env.PORT || 10000;
 
-/* =======================
-   SIGN HELPER
-======================= */
-function signPayload(payload) {
-  const msg = JSON.stringify(payload);
-  const hash = crypto.createHash("sha256").update(msg).digest("hex");
-  return wallet.signMessage(ethers.getBytes("0x" + hash));
+/* ================= SIGN ================= */
+function sign(action, nonce) {
+  const msg = JSON.stringify({ action, nonce });
+  const hash = crypto.createHash("sha256").update(msg).digest();
+  return wallet.signMessage(hash);
 }
 
-/* =======================
-   SEND TO HL
-======================= */
-async function sendHL(payload) {
-  const signature = await signPayload(payload);
+/* ================= HL CALL ================= */
+async function callHL(action) {
+  const nonce = Date.now();
+  const signature = await sign(action, nonce);
 
-  console.log("📤 HL PAYLOAD:", JSON.stringify(payload, null, 2));
-  console.log("✍️ SIGNATURE:", signature);
+  const body = {
+    action,
+    nonce,
+    signature,
+    account: wallet.address,
+  };
 
-  const res = await fetch(`${HL_API}/exchange`, {
+  console.log("📤 HL BODY:", JSON.stringify(body, null, 2));
+
+  const res = await fetch(`${HL}/exchange`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: payload,
-      signature,
-      account: wallet.address,
-    }),
+    body: JSON.stringify(body),
   });
 
   const text = await res.text();
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    json = text;
-  }
-
-  console.log("📥 HL RESPONSE:", json);
-  return json;
+  console.log("📥 HL RESPONSE:", text);
+  return text;
 }
 
-/* =======================
-   SET LEVERAGE
-======================= */
+/* ================= HELPERS ================= */
+async function getMarkPrice() {
+  const res = await fetch(`${HL}/info`);
+  const data = await res.json();
+  return Number(data.markPx[ASSET]);
+}
+
 async function setLeverage() {
-  const payload = {
-    type: "updateLeverage",
-    asset: ASSET,
-    leverage: LEVERAGE,
-    isCross: true,
-  };
-
-  console.log(`⚙️ SET LEVERAGE ${LEVERAGE}x`);
-  return sendHL(payload);
+  return callHL([
+    {
+      type: "updateLeverage",
+      asset: ASSET,
+      leverage: LEVERAGE,
+      isCross: true,
+    },
+  ]);
 }
 
-/* =======================
-   PLACE ORDER (ALL IN)
-======================= */
 async function placeOrder(side) {
   const isBuy = side === "long";
+  const price = await getMarkPrice();
 
-  const payload = {
-    type: "order",
-    orders: [
-      {
-        a: ASSET,
-        b: isBuy,
-        p: null,        // MARKET
-        s: "ALL",       // 100% balance
-        r: false,
-        ioc: true,
-      },
-    ],
-  };
+  // minimalny size – HL sam użyje marginu
+  const size = 0.001;
 
-  console.log("🚀 REAL ORDER:", side.toUpperCase());
-  return sendHL(payload);
+  return callHL([
+    {
+      type: "order",
+      orders: [
+        {
+          a: ASSET,
+          b: isBuy,
+          p: price,
+          s: size,
+          r: false,
+          ioc: true,
+        },
+      ],
+    },
+  ]);
 }
 
-/* =======================
-   WEBHOOK
-======================= */
+/* ================= WEBHOOK ================= */
 app.post("/webhook", async (req, res) => {
   try {
     const { side } = req.body;
-    if (!side || !["long", "short"].includes(side)) {
-      return res.status(400).json({ error: "invalid payload" });
+    if (!["long", "short"].includes(side)) {
+      return res.status(400).json({ error: "bad payload" });
     }
 
     console.log("📩 WEBHOOK:", side);
 
-    // 1️⃣ SET LEVERAGE (required)
     await setLeverage();
-
-    // 2️⃣ PLACE ORDER
     const result = await placeOrder(side);
 
     res.json({ success: true, result });
-  } catch (err) {
-    console.error("❌ EXECUTION ERROR:", err);
-    res.status(500).json({
-      error: "execution failed",
-      details: err?.message || err,
-    });
+  } catch (e) {
+    console.error("❌ ERROR:", e);
+    res.status(500).json({ error: e.message });
   }
 });
 
-/* =======================
-   START
-======================= */
+/* ================= START ================= */
 app.listen(PORT, () => {
-  console.log(`🚀 BOT LIVE on ${PORT}`);
+  console.log("🚀 BOT LIVE on", PORT);
 });
