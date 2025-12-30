@@ -16,15 +16,11 @@ if (!PRIVATE_KEY || !ACCOUNT) {
   console.error("❌ Missing ENV variables");
   process.exit(1);
 }
-
 if (!PRIVATE_KEY.startsWith("0x")) {
   console.error("❌ HL_PRIVATE_KEY must start with 0x");
   process.exit(1);
 }
 
-// =====================
-// WALLET
-// =====================
 const wallet = new Wallet(PRIVATE_KEY);
 
 console.log("✅ ENV OK");
@@ -33,32 +29,32 @@ console.log("👛 ACCOUNT:", ACCOUNT);
 // =====================
 // CONSTANTS
 // =====================
-const HL_ENDPOINT = "https://api.hyperliquid.xyz/exchange";
-const BTC_ASSET_ID = 0;
+const HL_URL = "https://api.hyperliquid.xyz/exchange";
+const BTC = 0;
 const LEVERAGE = 10;
+const SIZE = "0.001"; // MINIMALNY, PEWNY ROZMIAR
 
 // =====================
-// SIGN HELPER
+// SIGN
 // =====================
-function signPayload(payload) {
+function sign(payload) {
   const hash = crypto
     .createHash("sha256")
     .update(JSON.stringify(payload))
     .digest();
-
   return wallet.signMessage(hash);
 }
 
 // =====================
-// SEND TO HL
+// SEND
 // =====================
-async function sendToHL(payload) {
-  const signature = await signPayload(payload);
+async function send(payload) {
+  const signature = await sign(payload);
 
   console.log("📤 HL PAYLOAD:", JSON.stringify(payload, null, 2));
   console.log("✍️ SIGNATURE:", signature);
 
-  const res = await fetch(HL_ENDPOINT, {
+  const res = await fetch(HL_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -70,7 +66,6 @@ async function sendToHL(payload) {
 
   const text = await res.text();
   console.log("📥 HL RESPONSE:", text);
-
   return text;
 }
 
@@ -80,57 +75,45 @@ async function sendToHL(payload) {
 app.post("/webhook", async (req, res) => {
   try {
     const { side } = req.body;
-    if (!side || !["long", "short"].includes(side)) {
-      return res.status(400).json({ error: "invalid payload" });
+    if (!["long", "short"].includes(side)) {
+      return res.status(400).json({ error: "invalid side" });
     }
 
     console.log("📩 WEBHOOK:", side.toUpperCase());
 
-    // =====================
-    // SET LEVERAGE
-    // =====================
-    console.log(`⚙️ SET LEVERAGE ${LEVERAGE}x`);
-
-    await sendToHL({
+    // 1️⃣ SET LEVERAGE
+    await send({
       type: "updateLeverage",
-      asset: BTC_ASSET_ID,
+      asset: BTC,
       leverage: LEVERAGE,
       isCross: true
     });
 
-    // =====================
-    // REAL ORDER (FIXED)
-    // =====================
-    console.log("🚀 REAL ORDER:", side.toUpperCase());
-
-    const orderPayload = {
+    // 2️⃣ REAL MARKET ORDER (POPRAWNY)
+    const order = {
       type: "order",
       orders: [
         {
-          a: BTC_ASSET_ID,
-          b: side === "long",
-          p: "0",          // MARKET
-          s: "0.001",      // minimal size (działa zawsze)
-          r: false,
-          tif: "Ioc"       // <<< KLUCZOWE (NAPRAWIA DESERIALIZE)
+          a: BTC,                 // asset
+          b: side === "long",     // buy / sell
+          p: null,                // MARKET
+          s: SIZE,                // SIZE (STRING)
+          r: false,               // not reduce
+          tif: "Ioc",             // REQUIRED
+          cloid: crypto.randomUUID() // REQUIRED
         }
       ]
     };
 
-    const result = await sendToHL(orderPayload);
+    const result = await send(order);
 
-    res.json({
-      success: true,
-      result
-    });
-  } catch (err) {
-    console.error("❌ EXECUTION ERROR:", err.message);
-    res.status(500).json({ error: "execution failed", details: err.message });
+    res.json({ success: true, result });
+  } catch (e) {
+    console.error("❌ ERROR:", e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
-// =====================
-// START
 // =====================
 app.listen(PORT, () => {
   console.log(`🚀 BOT LIVE on ${PORT}`);
