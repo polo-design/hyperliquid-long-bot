@@ -1,14 +1,13 @@
 import express from "express";
-import { Hyperliquid } from "hyperliquid-sdk";
+import crypto from "crypto";
 
 const app = express();
 app.use(express.json());
 
-/* ================= ENV ================= */
-const PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
 const ACCOUNT = process.env.HL_ACCOUNT;
+const PRIVATE_KEY = process.env.HL_PRIVATE_KEY; // BEZ 0x
 
-if (!PRIVATE_KEY || !ACCOUNT) {
+if (!ACCOUNT || !PRIVATE_KEY) {
   console.error("❌ Missing ENV variables");
   process.exit(1);
 }
@@ -16,22 +15,47 @@ if (!PRIVATE_KEY || !ACCOUNT) {
 console.log("✅ ENV OK");
 console.log("👛 ACCOUNT:", ACCOUNT);
 
-/* ================= HL CLIENT ================= */
-const hl = new Hyperliquid({
-  privateKey: PRIVATE_KEY,
-  account: ACCOUNT,
-  isTestnet: false, // MAINNET
-});
+const BASE = "https://api.hyperliquid.xyz";
 
-/* ================= HELPERS ================= */
-async function getAvailableUSDC() {
-  const state = await hl.getAccountState();
-  return Number(state.availableBalance);
+/* ================= SIGN ================= */
+function sign(body) {
+  return crypto
+    .createHmac("sha256", Buffer.from(PRIVATE_KEY, "hex"))
+    .update(JSON.stringify(body))
+    .digest("hex");
 }
 
-async function getBTCPrice() {
-  const px = await hl.getMarkPrice("BTC");
-  return Number(px);
+/* ================= FETCH ================= */
+async function hlFetch(endpoint, body) {
+  const sig = sign(body);
+
+  const res = await fetch(BASE + endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "HL-ACCOUNT": ACCOUNT,
+      "HL-SIGNATURE": sig,
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(text);
+  }
+}
+
+/* ================= HELPERS ================= */
+async function getBalance() {
+  const res = await hlFetch("/info", { type: "accountState" });
+  return Number(res.availableBalance);
+}
+
+async function getPrice() {
+  const res = await hlFetch("/info", { type: "markPrice", coin: "BTC" });
+  return Number(res.markPx);
 }
 
 /* ================= WEBHOOK ================= */
@@ -40,50 +64,38 @@ app.post("/webhook", async (req, res) => {
     const { side } = req.body;
     console.log("📩 WEBHOOK:", side);
 
-    if (side !== "long" && side !== "short") {
+    if (side !== "long") {
       return res.status(422).json({ error: "invalid payload" });
     }
 
-    const usdc = await getAvailableUSDC();
-    if (usdc <= 1) {
-      throw new Error("Balance too low");
-    }
+    const usdc = await getBalance();
+    if (usdc <= 1) throw new Error("Balance too low");
 
-    const price = await getBTCPrice();
-    const size = Number((usdc / price).toFixed(4)); // BTC size
+    const price = await getPrice();
+    const size = Number((usdc / price).toFixed(4));
 
-    if (side === "long") {
-      await hl.placeOrder({
-        coin: "BTC",
-        isBuy: true,
-        size,
-        limitPrice: price,
-        reduceOnly: false,
-      });
+    const order = {
+      type: "order",
+      orders: [
+        {
+          coin: "BTC",
+          isBuy: true,
+          sz: size,
+          limitPx: price,
+          reduceOnly: false,
+        },
+      ],
+    };
 
-      console.log(`🚀 LONG BTC | size=${size}`);
-    }
+    const result = await hlFetch("/exchange", order);
+    console.log("🚀 ORDER SENT:", result);
 
-    if (side === "short") {
-      await hl.placeOrder({
-        coin: "BTC",
-        isBuy: false,
-        size: 999,
-        reduceOnly: true,
-      });
-
-      console.log("🔻 CLOSE POSITION");
-    }
-
-    res.json({ status: "ok", side, size });
-  } catch (err) {
-    console.error("❌ EXECUTION ERROR:", err.message);
-    res.status(500).json({ error: "execution failed", msg: err.message });
+    res.json({ status: "ok", size });
+  } catch (e) {
+    console.error("❌ EXECUTION ERROR:", e.message);
+    res.status(500).json({ error: "execution failed", msg: e.message });
   }
 });
-
-/* ================= HEALTH ================= */
-app.get("/", (_, res) => res.json({ status: "alive" }));
 
 /* ================= START ================= */
 const PORT = process.env.PORT || 10000;
