@@ -1,29 +1,28 @@
 import express from "express";
 import crypto from "crypto";
+import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
 
-// =====================
-// ENV (USTAW NA RENDERZE)
-// =====================
-const HL_API = "https://api.hyperliquid.xyz";
-const HL_PRIVATE_KEY = process.env.HL_PRIVATE_KEY; // hex, BEZ 0x
-const HL_ACCOUNT = process.env.HL_ACCOUNT;         // 0x...
-const TRADE_PERCENT = 0.9;                          // 90%
-const SYMBOL = "BTC";
+// ===============================
+// ENV — MUSZĄ ISTNIEĆ NA RENDERZE
+// ===============================
+const {
+  HL_PRIVATE_KEY,   // hex, BEZ 0x
+  HL_WALLET,        // 0x...
+  HL_API_URL = "https://api.hyperliquid.xyz",
+  PORT = 10000
+} = process.env;
 
-// =====================
-// WALIDACJA ENV
-// =====================
-if (!HL_PRIVATE_KEY || !HL_ACCOUNT) {
+if (!HL_PRIVATE_KEY || !HL_WALLET) {
   console.error("❌ Missing ENV variables");
   process.exit(1);
 }
 
-// =====================
-// HELPERS
-// =====================
+// ===============================
+// UTILS
+// ===============================
 function sign(payload) {
   return crypto
     .createHmac("sha256", Buffer.from(HL_PRIVATE_KEY, "hex"))
@@ -31,134 +30,114 @@ function sign(payload) {
     .digest("hex");
 }
 
-async function hlPost(endpoint, body) {
-  body.nonce = Date.now();
-  const payload = JSON.stringify(body);
+async function safeFetch(url, body) {
+  const payload = JSON.stringify({
+    ...body,
+    nonce: Date.now()
+  });
 
-  const res = await fetch(HL_API + endpoint, {
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Signature": sign(payload),
-      "X-Wallet": HL_ACCOUNT,
+      "X-Wallet": HL_WALLET,
+      "X-Signature": sign(payload)
     },
-    body: payload,
+    body: payload
   });
 
-  const text = await res.text();
+  const raw = await res.text();
 
-  // ⛔ Hyperliquid czasem zwraca PLAIN TEXT
-  if (!text.startsWith("{")) {
-    throw new Error(text);
+  if (!res.ok) {
+    console.error("❌ HL HTTP ERROR:", res.status, raw);
+    throw new Error(raw);
   }
 
-  return JSON.parse(text);
+  try {
+    return JSON.parse(raw);
+  } catch {
+    console.error("❌ HL NON-JSON RESPONSE:", raw);
+    throw new Error("HL returned non-JSON");
+  }
 }
 
-// =====================
-// CHECK: CZY JEST POZYCJA
-// =====================
-async function hasOpenPosition() {
-  const res = await fetch(HL_API + "/info", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      type: "userState",
-      user: HL_ACCOUNT,
-    }),
+// ===============================
+// HYPERLIQUID
+// ===============================
+async function getUserState() {
+  return safeFetch(`${HL_API_URL}/info`, {
+    type: "userState",
+    wallet: HL_WALLET
   });
+}
 
-  const data = await res.json();
-  return data.assetPositions?.some(
-    (p) => p.position.coin === SYMBOL && p.position.szi !== "0"
+async function hasOpenPosition(symbol = "BTC") {
+  const state = await getUserState();
+  return state.assetPositions?.some(
+    p => p.position?.coin === symbol && Math.abs(Number(p.position.szi)) > 0
   );
 }
 
-// =====================
-// BALANCE
-// =====================
-async function getAccountValue() {
-  const res = await fetch(HL_API + "/info", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      type: "userState",
-      user: HL_ACCOUNT,
-    }),
-  });
-
-  const data = await res.json();
-  return Number(data.marginSummary.accountValue);
-}
-
-// =====================
-// ORDERS
-// =====================
-async function openLong() {
-  if (await hasOpenPosition()) {
-    return { skipped: true, reason: "position already open" };
-  }
-
-  const balance = await getAccountValue();
-  const notional = balance * TRADE_PERCENT;
-
-  return hlPost("/exchange", {
+async function openLong(symbol = "BTC") {
+  return safeFetch(`${HL_API_URL}/exchange`, {
     type: "order",
-    orders: [
-      {
-        asset: SYMBOL,
-        isBuy: true,
-        reduceOnly: false,
-        orderType: { market: {} },
-        sz: notional,
-      },
-    ],
+    orders: [{
+      asset: symbol,
+      isBuy: true,
+      reduceOnly: false,
+      orderType: { market: {} },
+      sz: "ALL"
+    }]
   });
 }
 
-async function closePosition() {
-  return hlPost("/exchange", {
+async function closePosition(symbol = "BTC") {
+  return safeFetch(`${HL_API_URL}/exchange`, {
     type: "order",
-    orders: [
-      {
-        asset: SYMBOL,
-        isBuy: false,
-        reduceOnly: true,
-        orderType: { market: {} },
-        sz: "ALL",
-      },
-    ],
+    orders: [{
+      asset: symbol,
+      isBuy: false,
+      reduceOnly: true,
+      orderType: { market: {} },
+      sz: "ALL"
+    }]
   });
 }
 
-// =====================
+// ===============================
 // WEBHOOK
-// =====================
+// ===============================
 app.post("/webhook", async (req, res) => {
   const { side } = req.body;
   console.log("📩 WEBHOOK:", side);
 
+  if (side !== "long" && side !== "short") {
+    return res.status(422).json({ error: "invalid payload" });
+  }
+
   try {
     if (side === "long") {
-      const result = await openLong();
-      return res.json({ status: "ok", side, result });
+      if (await hasOpenPosition()) {
+        return res.json({ status: "skipped", reason: "already in position" });
+      }
+      const r = await openLong();
+      return res.json({ status: "long opened", result: r });
     }
 
     if (side === "short") {
-      const result = await closePosition();
-      return res.json({ status: "ok", side, result });
+      const r = await closePosition();
+      return res.json({ status: "position closed", result: r });
     }
 
-    return res.status(422).json({ error: "invalid payload" });
   } catch (err) {
     console.error("❌ EXECUTION ERROR:", err.message);
     return res.status(500).json({ error: "execution failed" });
   }
 });
 
-// =====================
+// ===============================
 app.get("/", (_, res) => res.json({ status: "alive" }));
 
-app.listen(10000, () => {
-  console.log("🚀 BOT LIVE on 10000");
+app.listen(PORT, () => {
+  console.log(`🚀 BOT LIVE on ${PORT}`);
 });
