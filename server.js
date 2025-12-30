@@ -1,12 +1,15 @@
 import express from "express";
-import crypto from "crypto";
+import { Wallet, keccak256, toUtf8Bytes } from "ethers";
 
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 10000;
-const HL_PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
-const HL_ACCOUNT = process.env.HL_ACCOUNT;
+// ===== ENV =====
+const {
+  HL_PRIVATE_KEY,
+  HL_ACCOUNT,
+  PORT = 10000
+} = process.env;
 
 if (!HL_PRIVATE_KEY || !HL_ACCOUNT) {
   console.error("❌ Missing ENV variables");
@@ -21,37 +24,35 @@ if (!HL_PRIVATE_KEY.startsWith("0x")) {
 console.log("✅ ENV OK");
 console.log("👛 ACCOUNT:", HL_ACCOUNT);
 
-const HL_ENDPOINT = "https://api.hyperliquid.xyz/exchange";
+// ===== WALLET =====
+const wallet = new Wallet(HL_PRIVATE_KEY);
 
-/* ---------- SIGN ---------- */
-function sign(action, nonce) {
-  const msg = JSON.stringify({ action, nonce });
-  return (
-    "0x" +
-    crypto
-      .createHash("sha256")
-      .update(msg + HL_PRIVATE_KEY.slice(2))
-      .digest("hex")
-  );
+// ===== HL CONSTANTS =====
+const HL_API = "https://api.hyperliquid.xyz/exchange";
+const BTC_ASSET_ID = 0;
+const LEVERAGE = 10;
+
+// ===== SIGN =====
+function signPayload(payload) {
+  const hash = keccak256(toUtf8Bytes(JSON.stringify(payload)));
+  return wallet.signMessage(hash);
 }
 
-/* ---------- SEND ---------- */
-async function send(action) {
-  const nonce = Date.now();
-  const signature = sign(action, nonce);
+// ===== SEND TO HL =====
+async function sendToHL(payload) {
+  const signature = await signPayload(payload);
 
-  const body = {
-    action,
-    nonce,
-    signature,
-  };
+  console.log("📤 HL PAYLOAD:", JSON.stringify(payload, null, 2));
+  console.log("✍️ SIGNATURE:", signature);
 
-  console.log("📤 HL BODY:", JSON.stringify(body, null, 2));
-
-  const res = await fetch(HL_ENDPOINT, {
+  const res = await fetch(HL_API, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      action: payload,
+      signature,
+      nonce: Date.now()
+    })
   });
 
   const text = await res.text();
@@ -59,47 +60,62 @@ async function send(action) {
   return text;
 }
 
-/* ---------- WEBHOOK ---------- */
+// ===== SET LEVERAGE =====
+async function setLeverage() {
+  const payload = {
+    type: "updateLeverage",
+    asset: BTC_ASSET_ID,
+    leverage: LEVERAGE,
+    isCross: true
+  };
+
+  console.log(`⚙️ SET LEVERAGE ${LEVERAGE}x`);
+  await sendToHL(payload);
+}
+
+// ===== MARKET ORDER =====
+async function marketOrder(side) {
+  const isLong = side === "long";
+
+  const payload = {
+    type: "order",
+    orders: [
+      {
+        a: BTC_ASSET_ID,
+        b: isLong,          // true = long, false = short
+        p: "0",             // MARKET (MUST be string)
+        s: "50",            // SIZE (number as string, NOT "ALL")
+        r: false,
+        tif: "Ioc"          // MARKET
+      }
+    ]
+  };
+
+  console.log(`🚀 REAL ORDER: ${side.toUpperCase()}`);
+  await sendToHL(payload);
+}
+
+// ===== WEBHOOK =====
 app.post("/webhook", async (req, res) => {
   try {
-    const side = req.body.side;
-    if (!side) {
-      return res.status(400).json({ error: "missing side" });
-    }
-
+    const { side } = req.body;
     console.log("📩 WEBHOOK:", side);
 
-    /* 1️⃣ SET LEVERAGE 10x CROSS */
-    await send({
-      type: "updateLeverage",
-      asset: 0, // BTC
-      isCross: true,
-      leverage: 10,
-    });
+    if (!side || !["long", "short"].includes(side)) {
+      return res.status(400).json({ error: "Invalid side" });
+    }
 
-    /* 2️⃣ MARKET ORDER – ALL IN */
-    await send({
-      type: "order",
-      orders: [
-        {
-          asset: 0, // BTC
-          isBuy: side === "long",
-          size: "ALL",
-          limitPx: null,
-          reduceOnly: false,
-          orderType: { market: {} },
-        },
-      ],
-    });
+    await setLeverage();
+    await marketOrder(side);
 
-    res.json({ success: true });
+    res.json({ success: true, side });
   } catch (err) {
-    console.error("❌ ERROR:", err);
+    console.error("❌ EXECUTION ERROR:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-/* ---------- START ---------- */
+// ===== START =====
 app.listen(PORT, () => {
-  console.log("🚀 BOT LIVE on", PORT);
+  console.log(`🚀 BOT LIVE on ${PORT}`);
 });
